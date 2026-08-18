@@ -131,41 +131,136 @@ def fingerprint(item):
     return hashlib.sha256((item["title"] + "|" + item["link"]).encode()).hexdigest()
 
 def classify(item):
-    text = (item["title"] + " " + item["description"]).lower()
-    resource_hits = [term for term in RESOURCE if term in text]
-    free_hit = any(term in text for term in FREE_WORDS)
-    if not free_hit:
-        return -999, [], [], "no-free-signal"
-    if any(term in text for term in BAD):
-        return -999, [], [], "paid-or-trial"
+    text = (
+        item["title"]
+        + " "
+        + item["description"]
+    ).lower()
+
+    resource_hits = [
+        term
+        for term in RESOURCE
+        if term in text
+    ]
+
     if not resource_hits:
         return -999, [], [], "not-resource"
 
-    # Reject music/editorial news unless it clearly contains a downloadable resource.
-    editorial = any(term in text for term in EDITORIAL)
-    resource_phrase = any(term in text for term in (
-        "download", "sample pack", "preset pack", "vocal pack",
-        "acapella pack", "free vst", "free vst3", "free plugin"
-    ))
-    if editorial and not resource_phrase:
+    # Must explicitly indicate that the item is free.
+    free_hit = any(
+        term in text
+        for term in FREE_WORDS
+    )
+
+    if not free_hit:
+        return -999, [], [], "no-free-signal"
+
+    # Never publish trials, demos, subscriptions, etc.
+    if any(
+        term in text
+        for term in BAD
+    ):
+        return -999, [], [], "paid-or-trial"
+
+    # Editorial/listicle/news pages are not resources themselves.
+    if any(
+        term in text
+        for term in EDITORIAL
+    ):
         return -999, [], [], "editorial"
 
-    genres = [term for term in GENRES if term in text]
-    categories = [
-        category for category, terms in CATEGORY_TERMS.items()
-        if any(term in text for term in terms)
+    # A real downloadable/free-resource signal must be present.
+    resource_phrase = any(
+        term in text
+        for term in (
+            "download",
+            "downloadable",
+            "sample pack",
+            "preset pack",
+            "vocal pack",
+            "acapella pack",
+            "free vst",
+            "free vst3",
+            "free plugin",
+            "free sample",
+            "free samples",
+            "free preset",
+            "free presets",
+            "free drum kit",
+        )
+    )
+
+    if not resource_phrase:
+        return -999, [], [], "not-direct-resource"
+
+    genres = [
+        term
+        for term in GENRES
+        if term in text
     ]
 
-    score = 10 + sum(RESOURCE[x] for x in resource_hits)
-    score += sum(GENRES[x] for x in genres)
-    if genres:
-        score += 15
-    if any(x in text for x in ("download", "downloadable", "get the pack")):
-        score += 6
-    if any(x in text for x in ("hip-hop", "trap", "dubstep", "metal", "orchestral")) and not genres:
-        score -= 12
+    # IMPORTANT: the Telegram channel is genre-focused.
+    # Generic resources with no house/techno/minimal evidence are rejected.
+    if not genres:
+        return -999, [], [], "no-target-genre"
 
-    return score, genres, categories[:3], "ok"
+    categories = [
+        category
+        for category, terms in CATEGORY_TERMS.items()
+        if any(
+            term in text
+            for term in terms
+        )
+    ]
+
+    score = (
+        15
+        + sum(
+            RESOURCE[x]
+            for x in resource_hits
+        )
+        + sum(
+            GENRES[x]
+            for x in genres
+        )
+    )
+
+    if any(
+        x in text
+        for x in (
+            "download",
+            "downloadable",
+            "get the pack",
+        )
+    ):
+        score += 8
+
+    # Penalize clearly unrelated genres unless the target genre is also present.
+    unrelated = (
+        "hip-hop",
+        "hip hop",
+        "trap",
+        "dubstep",
+        "metal",
+        "orchestral",
+        "country",
+        "reggae",
+        "drum and bass",
+        "dnb",
+    )
+
+    if any(x in text for x in unrelated):
+        score -= 10
+
+    if score < 35:
+        return -999, [], [], "low-score"
+
+    return (
+        score,
+        genres,
+        categories[:3],
+        "ok",
+    )
 
 def translate_ru(text):
     text = clean_text(text)
