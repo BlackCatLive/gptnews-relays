@@ -9,12 +9,32 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHANNEL = os.getenv("TELEGRAM_CHANNEL", "").strip()
 SEEN_FILE = "seen.json"
 
-GENRES = {
-    "minimal house": 16, "deep minimal": 18, "rominimal": 20,
-    "romanian minimal": 20, "minimal techno": 14, "minimal tech": 14,
-    "deep tech": 13, "deep house": 12, "tech house": 11,
-    "minimal": 7, "house": 6, "techno": 6, "electronic": 3,
+CORE_GENRES = {
+    "minimal house": 18,
+    "deep minimal": 20,
+    "rominimal": 22,
+    "romanian minimal": 22,
+    "minimal techno": 16,
+    "minimal tech": 16,
+    "deep tech": 15,
+    "deep house": 14,
+    "tech house": 13,
+    "minimal": 10,
 }
+
+RELATED_GENRES = {
+    "afro house": 7,
+    "progressive house": 6,
+    "organic house": 5,
+    "melodic house": 5,
+    "indie dance": 4,
+    "electro house": 3,
+    "house": 5,
+    "techno": 5,
+    "electronic": 2,
+}
+
+GENRES = {**CORE_GENRES, **RELATED_GENRES}
 
 RESOURCE = {
     "acapella": 14, "acapellas": 14, "vocal pack": 14, "vocal packs": 14,
@@ -144,6 +164,17 @@ def parse_feed(source, url, hint=""):
 def fingerprint(item):
     return hashlib.sha256((item["title"] + "|" + item["link"]).encode()).hexdigest()
 
+def genre_tier(genres):
+    core = [g for g in genres if g in CORE_GENRES]
+    related = [g for g in genres if g in RELATED_GENRES and g not in CORE_GENRES]
+
+    if core:
+        return "CORE", core, related
+    if related:
+        return "RELATED", core, related
+    return "UNIVERSAL", core, related
+
+
 def classify(item):
     main_text = (item["title"] + " " + item["description"]).lower()
     hint = (item.get("hint") or "").lower()
@@ -184,6 +215,8 @@ def classify(item):
         return -999, [], [], "not-direct-resource"
 
     genres = [term for term in GENRES if term in text]
+    tier, core_genres, related_genres = genre_tier(genres)
+
     categories = [
         category for category, terms in CATEGORY_TERMS.items()
         if any(term in main_text for term in terms)
@@ -210,9 +243,12 @@ def classify(item):
 
     score = 12 + sum(RESOURCE[x] for x in resource_hits) + sum(GENRES[x] for x in genres)
 
-    if genres:
-        score += 18
-    if "rominimal" in genres or "deep minimal" in genres or "minimal house" in genres:
+    if tier == "CORE":
+        score += 22
+    elif tier == "RELATED":
+        score += 7
+
+    if any(x in core_genres for x in ("rominimal", "deep minimal", "minimal house")):
         score += 10
     if any(x in main_text for x in ("royalty-free", "royalty free", "commercial use")):
         score += 5
@@ -224,7 +260,8 @@ def classify(item):
     if score < 35:
         return -999, [], [], "low-score"
 
-    return score, genres, categories[:3], "ok"
+    tagged_genres = [f"tier:{tier}"] + genres
+    return score, tagged_genres, categories[:3], "ok"
 
 def translate_ru(text):
     text = clean_text(text)
@@ -257,7 +294,9 @@ def build_post(item, score, genres, categories):
         raise RuntimeError("translation returned original title")
 
     tags = " ".join("#" + x for x in categories) or "#resources"
-    genre_text = ", ".join(genres[:3])
+    tier = next((x.split(":", 1)[1] for x in genres if x.startswith("tier:")), "UNIVERSAL")
+    real_genres = [x for x in genres if not x.startswith("tier:")]
+    genre_text = ", ".join(real_genres[:3])
 
     parts = [
         f"🎛 <b>{html.escape(title_ru)}</b>",
@@ -265,10 +304,12 @@ def build_post(item, score, genres, categories):
         f"🏷 {tags}",
     ]
 
-    if genre_text:
-        parts.append("🎯 <b>Под твой жанр:</b> " + html.escape(genre_text))
+    if tier == "CORE":
+        parts.append("🎯 <b>ПОД ТВОЙ ЖАНР</b>" + (": " + html.escape(genre_text) if genre_text else ""))
+    elif tier == "RELATED":
+        parts.append("🟡 <b>БЛИЗКИЙ ЖАНР</b>" + (": " + html.escape(genre_text) if genre_text else ""))
     else:
-        parts.append("🎯 <b>Универсальный ресурс для электронной музыки</b>")
+        parts.append("🔧 <b>УНИВЕРСАЛЬНЫЙ РЕСУРС</b>")
 
     if desc_ru:
         if len(desc_ru) > 320:
@@ -383,5 +424,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
