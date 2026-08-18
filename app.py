@@ -266,6 +266,10 @@ def main():
                 errors += 1
                 print("TELEGRAM ERROR:", e, flush=True)
 
+    except Exception as e:
+        errors += 1
+        print("BPB ERROR:", e, flush=True)
+
     save_seen(seen)
 
     print(
@@ -277,4 +281,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
