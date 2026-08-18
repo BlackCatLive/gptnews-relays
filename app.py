@@ -18,16 +18,15 @@ SOURCES = [
     ("Bedroom Producers Blog", "https://bedroomproducersblog.com/feed/"),
     ("Rekkerd", "https://rekkerd.org/feed/"),
     ("MusicRadar", "https://www.musicradar.com/feeds.xml"),
-    ("Sound On Sound", "https://www.soundonsound.com/news/sosrssfeed.php"),
 
-    ("Google: free VST", "https://news.google.com/rss/search?q=free+VST+plugin+music+production&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: free samples", "https://news.google.com/rss/search?q=free+sample+pack+music+production&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: free vocals", "https://news.google.com/rss/search?q=free+vocal+pack+vocals+music+production&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: Serum presets", "https://news.google.com/rss/search?q=free+Serum+presets&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: Vital presets", "https://news.google.com/rss/search?q=free+Vital+presets&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: free drum kits", "https://news.google.com/rss/search?q=free+drum+kit+one+shots+samples&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: KVR free audio", "https://news.google.com/rss/search?q=site%3Akvraudio.com+%22free%22+plugin+OR+VST+OR+soundware&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: free synth presets", "https://news.google.com/rss/search?q=free+synth+presets+wavetable+producer&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: free VST downloads", "https://news.google.com/rss/search?q=%22free+VST%22+%22download%22+plugin&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: free sample downloads", "https://news.google.com/rss/search?q=%22free+sample+pack%22+download&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: free vocal downloads", "https://news.google.com/rss/search?q=%22free+vocal+pack%22+download&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: Serum preset downloads", "https://news.google.com/rss/search?q=%22free+Serum+presets%22+download&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: Vital preset downloads", "https://news.google.com/rss/search?q=%22free+Vital+presets%22+download&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: free drum kit downloads", "https://news.google.com/rss/search?q=%22free+drum+kit%22+download+samples&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: KVR free downloads", "https://news.google.com/rss/search?q=site%3Akvraudio.com+%22free+download%22+VST+OR+plugin+OR+soundware&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: free synth presets downloads", "https://news.google.com/rss/search?q=%22free+synth+presets%22+download&hl=en-US&gl=US&ceid=US:en"),
 ]
 
 GOOD = {
@@ -56,7 +55,16 @@ BAD = [
 
 GENERIC = [
     "tutorial", "how to", "guide", "review", "comparison",
-    "interview", "podcast", "newsletter", "tips", "explained",
+    "interview", "podcast", "newsletter", "tips", "tricks",
+    "explained", "video tutorial", "watch the video",
+]
+
+LISTICLE = [
+    "best free", "top 5", "top 10", "top 20", "top 50",
+    "ultimate list", "list of", "platforms for free",
+    "sample packs for", "packs to kickstart", "unlock your sound",
+    "10 free", "20 free", "50 free", "70 free",
+    "2026 guide", "roundup", "round-up", "buyer guide",
 ]
 
 LIMITED = [
@@ -152,31 +160,58 @@ def translate_ru(text):
         return text
 
 
-def analyze(title, desc):
+def analyze(title, desc, source=""):
     text = (title + " " + desc).lower()
+    source_low = source.lower()
 
+    # Never publish trials/subscriptions/rent-to-own.
     bad = [x for x in BAD if x in text]
     if bad:
         return False, -999, bad, False
 
     has_free = any(x in text for x in [
-        "free", "0.00", "$0", "£0", "€0", "pay what you like",
-        "pay-what-you-like", "name your price"
+        "free", "0.00", "$0", "£0", "€0",
+        "pay what you like", "pay-what-you-like", "name your price"
     ])
     if not has_free:
         return False, 0, [], False
 
+    product_terms = [
+        "plugin", "vst", "vst3", "au plugin", "aax",
+        "sample pack", "samples", "vocal", "vocals",
+        "preset", "presets", "serum", "vital",
+        "drum kit", "drums", "one-shot", "one shot",
+        "loop", "loops", "soundbank", "sound bank",
+        "synth", "midi", "kontakt", "decentsampler"
+    ]
+
+    if not any(k in text for k in product_terms):
+        return False, 0, [], False
+
     score = sum(v for k, v in GOOD.items() if k in text)
 
-    # Бесплатность должна быть связана с нашим типом контента.
-    if not any(k in text for k in [
-        "plugin", "vst", "sample", "vocal", "preset", "serum",
-        "vital", "drum", "one-shot", "loop", "soundbank", "synth"
-    ]):
-        return False, score, [], False
+    # Google News is a discovery layer, not a source of generic articles.
+    # For Google results we require a direct download/product announcement signal.
+    if source_low.startswith("google:"):
+        direct = [
+            "free download", "download", "available for free",
+            "released", "releases", "is free", "now free",
+            "free plugin", "free vst", "free sample pack",
+            "free vocal pack", "free presets", "free preset"
+        ]
+        if not any(x in text for x in direct):
+            return False, score, [], False
 
-    # Общие статьи/обзоры не нужны, если нет сильного совпадения.
-    if any(x in text for x in GENERIC) and score < 14:
+        # Reject listicles/tutorials/reviews that merely mention free products.
+        if any(x in text for x in LISTICLE):
+            return False, score, [], False
+        if any(x in text for x in GENERIC) and not any(
+            x in text for x in ["released", "releases", "is free", "now free", "available for free"]
+        ):
+            return False, score, [], False
+
+    # For all sources, weak generic articles are not enough.
+    if any(x in text for x in GENERIC) and score < 16:
         return False, score, [], False
 
     limited = any(x in text for x in LIMITED)
@@ -277,7 +312,7 @@ def main():
     errors = 0
     candidates = []
 
-    print("START FAST MULTI-SOURCE SCAN", flush=True)
+    print("START FAST MULTI-SOURCE SCAN v9 QUALITY FILTER", flush=True)
 
     # Параллельно читаем источники — поэтому релей больше не должен
     # ждать каждый RSS по очереди.
@@ -299,7 +334,7 @@ def main():
                 if key in seen:
                     continue
 
-                ok, score, bad, limited = analyze(title, desc)
+                ok, score, bad, limited = analyze(title, desc, name)
 
                 # Сразу запоминаем просмотренные URL, чтобы не гонять их
                 # по кругу на следующих запусках.
@@ -316,7 +351,12 @@ def main():
     # Самое релевантное — первым.
     candidates.sort(key=lambda x: x[0], reverse=True)
 
-    MAX_POSTS_PER_RUN = 12
+    by_source = {}
+    for item in candidates:
+        by_source[item[2]] = by_source.get(item[2], 0) + 1
+    print("CANDIDATES BY SOURCE:", by_source, flush=True)
+
+    MAX_POSTS_PER_RUN = 12  # safe cap; raise after quality check
     for score, limited, source, title, url, desc, key in candidates:
         if published >= MAX_POSTS_PER_RUN:
             break
