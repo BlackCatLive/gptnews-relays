@@ -1,225 +1,280 @@
-import os, time, json, hashlib, re, html, concurrent.futures
+import os
+import time
+import json
+import hashlib
+import html
+import re
+from html.parser import HTMLParser
 from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@gptnews999")
 
-FEEDS = [
-    ("Bedroom Producers Blog", "https://bedroomproducersblog.com/feed/"),
-    ("SoundShockAudio", "https://soundshockaudio.com/feed/"),
+# SoundShockAudio is now the primary source.
+SOUND_SHOCK = [
+    ("🔌 PLUGINS", "https://soundshockaudio.com/vst-plugins/"),
+    ("🥁 SAMPLES", "https://soundshockaudio.com/samples-and-loops/"),
+    ("🎹 PRESETS", "https://soundshockaudio.com/synth-presets/"),
+    ("🎛️ TEMPLATES", "https://soundshockaudio.com/daw-templates/"),
+    ("🎼 KONTAKT", "https://soundshockaudio.com/kontakt-instruments/"),
+    ("🎹 MIDI", "https://soundshockaudio.com/midi/"),
 ]
 
-CATEGORIES = {
-    "🎤 VOCALS": ["vocal", "vocals", "voice", "acapella", "acapellas"],
-    "🎹 PRESETS": ["preset", "presets", "serum preset", "vital preset", "sylenth preset", "massive preset", "spire preset"],
-    "🥁 SAMPLES": ["sample pack", "samples", "drum kit", "drum pack", "one-shot", "one shot", "loop pack", "loops", "sound pack", "sound library"],
-    "🔌 PLUGINS": ["free vst", "vst plugin", "vst3", "audio plugin", "plugin", "effect plugin", "synth plugin", "instrument plugin"],
-    "🎛️ MIDI / TEMPLATES": ["midi", "midi pack", "template", "templates", "project file", "project files"],
-    "🎼 KONTAKT": ["kontakt", "decent sampler", "sfz library"],
-}
-
-FREE = [
-    "free download", "free to download", "free plugin", "free vst",
-    "free sample pack", "free samples", "free presets", "free preset",
-    "free sound library", "free kontakt", "now free", "is free",
-    "are free", "available for free", "released for free", "freebie",
-    "giveaway", "100% free", "completely free", "totally free",
-]
+BPB_FEED = ("Bedroom Producers Blog", "https://bedroomproducersblog.com/feed/")
 
 BAD = [
-    "free trial", "trial version", "free demo", "demo version", "trial",
-    "subscription", "subscription required", "membership required",
-    "rent-to-own", "rent to own", "paid", "buy now", "commercial license",
-    "discount", "sale", "coupon", "upgrade required",
+    "trial", "demo", "subscription", "membership",
+    "rent-to-own", "rent to own", "paid", "buy now",
+    "commercial license", "discount", "coupon",
 ]
 
 GENERIC = [
-    "best ", "top ", "how to", "guide", "tutorial", "review",
-    "comparison", "versus", "what is", "explained", "tips",
-    "roundup", "round-up", "interview", "podcast",
+    "best ", "top ", "how to", "guide", "tutorial",
+    "review", "comparison", "versus", "what is",
+    "explained", "tips", "roundup", "round-up",
+    "interview", "podcast",
 ]
 
+EXCLUDED_PATHS = {
+    "free-downloads", "browse", "about-us", "blog", "category",
+    "vst-plugins", "samples-and-loops", "synth-presets",
+    "daw-templates", "kontakt-instruments", "midi",
+    "free-kontakt-instruments", "free-vst-plugins",
+}
+
+class LinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self.current_href = None
+        self.current_text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self.current_href = dict(attrs).get("href")
+            self.current_text = []
+
+    def handle_data(self, data):
+        if self.current_href is not None:
+            self.current_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.current_href is not None:
+            text = re.sub(r"\s+", " ", " ".join(self.current_text)).strip()
+            self.links.append((self.current_href, text))
+            self.current_href = None
+            self.current_text = []
+
 def clean(s):
-    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
+    return re.sub(r"\s+", " ", html.unescape(s or "")).strip()
 
 def load_seen():
     try:
-        with open("seen.json", encoding="utf-8") as f:
+        with open("seen_v2.json", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 def save_seen(seen):
-    with open("seen.json", "w", encoding="utf-8") as f:
+    with open("seen_v2.json", "w", encoding="utf-8") as f:
         json.dump(seen, f, ensure_ascii=False)
 
-def get_feed(source_url):
-    raw = urlopen(
-        Request(source_url, headers={"User-Agent": "GPTNewsRelay/3.0"}),
-        timeout=10
-    ).read()
+def fetch(url):
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (GPTNewsRelay/4.0)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    return urlopen(req, timeout=12).read()
 
+def product_links(page_url):
+    raw = fetch(page_url)
+    parser = LinkParser()
+    parser.feed(raw.decode("utf-8", errors="ignore"))
+
+    result = []
+    seen = set()
+
+    for href, text in parser.links:
+        if not href or not text:
+            continue
+
+        absolute = urljoin(page_url, href)
+        p = urlparse(absolute)
+
+        if p.netloc not in ("soundshockaudio.com", "www.soundshockaudio.com"):
+            continue
+
+        parts = [x for x in p.path.split("/") if x]
+        if len(parts) != 1:
+            continue
+
+        slug = parts[0].lower()
+        if slug in EXCLUDED_PATHS:
+            continue
+
+        if absolute in seen:
+            continue
+
+        # Product cards generally have a short, meaningful title.
+        if len(text) < 3 or len(text) > 180:
+            continue
+
+        if any(x in text.lower() for x in GENERIC):
+            continue
+
+        seen.add(absolute)
+        result.append((clean(text), absolute))
+
+    return result
+
+def get_bpb():
+    raw = fetch(BPB_FEED[1])
     root = ET.fromstring(raw)
-    items = []
+    out = []
 
     for x in root.findall(".//item"):
         title = clean(x.findtext("title"))
         link = clean(x.findtext("link"))
         desc = clean(x.findtext("description"))
         if title and link:
-            items.append((title, link, desc))
+            out.append((title, link, desc))
 
-    # Atom fallback
-    if not items:
-        ns = {"a": "http://www.w3.org/2005/Atom"}
-        for x in root.findall(".//a:entry", ns):
-            title = clean(x.findtext("a:title", "", ns))
-            link_el = x.find("a:link", ns)
-            link = link_el.attrib.get("href", "") if link_el is not None else ""
-            desc = clean(
-                x.findtext("a:summary", "", ns)
-                or x.findtext("a:content", "", ns)
-            )
-            if title and link:
-                items.append((title, link, desc))
+    return out[-20:]
 
-    return items[-30:]
-
-def classify(title, desc):
-    text = (title + " " + desc).lower()
-
-    if any(x in title.lower() for x in GENERIC):
-        return None
-
-    for tag, words in CATEGORIES.items():
-        if any(w in text for w in words):
-            return tag
-
-    return None
-
-def is_free(title, desc):
+def bpb_is_free(title, desc):
     text = (title + " " + desc).lower()
 
     if any(x in text for x in BAD):
         return False
 
-    return any(x in text for x in FREE) or bool(re.search(r"\bFREE\b", title, re.I))
+    return (
+        "free" in title.lower()
+        or "free download" in text
+        or "free plugin" in text
+        or "free sample" in text
+        or "free preset" in text
+        or "free vst" in text
+    )
 
 def send_telegram(text, url):
     payload = json.dumps({
         "chat_id": CHANNEL,
         "text": text + "\n\n🔗 " + url,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": False,
     }).encode()
 
     req = Request(
         "https://api.telegram.org/bot" + TOKEN + "/sendMessage",
         data=payload,
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
     )
-    urlopen(req, timeout=15).read()
 
-def make_post(tag, title, desc, source):
-    desc = clean(desc)
-    if len(desc) > 600:
-        desc = desc[:597] + "..."
+    with urlopen(req, timeout=15) as response:
+        response.read()
 
-    out = [
-        tag,
-        "",
-        "<b>" + html.escape(title) + "</b>",
-    ]
+def post(tag, title, url, source):
+    title = clean(title)
 
-    if desc:
-        out += ["", html.escape(desc)]
+    text = (
+        f"{tag}\n\n"
+        f"<b>{html.escape(title)}</b>\n\n"
+        f"🆓 <b>FREE</b>\n"
+        f"📌 {html.escape(source)}"
+    )
 
-    out += [
-        "",
-        "🆓 <b>FREE</b>",
-        "📌 " + html.escape(source),
-    ]
-
-    return "\n".join(out)
-
-def check_source(item):
-    source, url = item
-    try:
-        return source, get_feed(url), None
-    except Exception as e:
-        return source, [], str(e)
+    send_telegram(text, url)
 
 def main():
     if not TOKEN:
-        print("ERROR: TELEGRAM_BOT_TOKEN is missing")
+        print("ERROR: TELEGRAM_BOT_TOKEN missing", flush=True)
         return 1
 
     seen = load_seen()
     published = 0
-    skipped = 0
-    errors = []
+    errors = 0
 
-    print("CHECKING FEEDS...", flush=True)
+    print("START", flush=True)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(FEEDS)) as pool:
-        results = list(pool.map(check_source, FEEDS))
+    # Check SoundShock categories.
+    for tag, page in SOUND_SHOCK:
+        try:
+            items = product_links(page)
+            print(f"{tag}: FOUND {len(items)} product links", flush=True)
 
-    for source, items, error in results:
-        if error:
-            print("FEED ERROR", source, error, flush=True)
-            errors.append(source + ": " + error)
-            continue
+            # Only publish a few on the first run, then new ones normally.
+            for title, url in items[:5]:
+                key = hashlib.sha256(url.encode()).hexdigest()
 
-        print("FOUND", len(items), "items from", source, flush=True)
+                if key in seen:
+                    continue
 
-        for title, link, desc in items:
-            key = hashlib.sha256(link.encode()).hexdigest()
+                try:
+                    post(tag, title, url, "SoundShockAudio")
+                    seen[key] = int(time.time())
+                    published += 1
+                    print("POSTED:", title, flush=True)
+                    time.sleep(0.4)
+                except Exception as e:
+                    errors += 1
+                    print("TELEGRAM ERROR:", e, flush=True)
+
+        except Exception as e:
+            errors += 1
+            print("SOUND SHOCK ERROR:", tag, e, flush=True)
+
+    # BPB is backup only; never post ordinary articles.
+    try:
+        bpb_items = get_bpb()
+        print("BPB:", len(bpb_items), "items", flush=True)
+
+        for title, url, desc in bpb_items:
+            key = hashlib.sha256(url.encode()).hexdigest()
 
             if key in seen:
                 continue
 
-            tag = classify(title, desc)
-
-            if not tag:
-                skipped += 1
-                seen[key] = int(time.time())
-                continue
-
-            if not is_free(title, desc):
-                skipped += 1
+            if not bpb_is_free(title, desc):
                 seen[key] = int(time.time())
                 continue
 
             try:
-                send_telegram(make_post(tag, title, desc, source), link)
+                tag = "🎛️ MUSIC PRODUCTION"
+                low = (title + " " + desc).lower()
 
-                # Mark as seen ONLY after successful Telegram delivery.
+                if "vocal" in low:
+                    tag = "🎤 VOCALS"
+                elif "preset" in low or "serum" in low or "vital" in low:
+                    tag = "🎹 PRESETS"
+                elif "sample" in low or "drum" in low:
+                    tag = "🥁 SAMPLES"
+                elif "vst" in low or "plugin" in low:
+                    tag = "🔌 PLUGINS"
+
+                post(tag, title, url, "Bedroom Producers Blog")
                 seen[key] = int(time.time())
                 published += 1
-
-                print("POSTED:", title, flush=True)
-                time.sleep(0.35)
+                print("POSTED BPB:", title, flush=True)
+                time.sleep(0.4)
 
             except Exception as e:
-                errors.append("Telegram: " + str(e))
+                errors += 1
                 print("TELEGRAM ERROR:", e, flush=True)
 
     save_seen(seen)
 
     print(
-        "DONE",
-        "published=", published,
-        "skipped=", skipped,
-        "errors=", len(errors),
+        f"DONE published={published} errors={errors}",
         flush=True
     )
-
-    if errors:
-        for e in errors:
-            print("ERROR:", e, flush=True)
 
     return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
