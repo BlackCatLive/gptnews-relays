@@ -1,229 +1,225 @@
-import os,time,json,hashlib,re,html
-from http.server import BaseHTTPRequestHandler,HTTPServer
-from urllib.request import Request,urlopen
+import os, time, json, hashlib, re, html, concurrent.futures
+from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
-TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
-CHANNEL=os.getenv("TELEGRAM_CHANNEL","@gptnews999")
-SECRET=os.getenv("RELAY_SECRET","")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@gptnews999")
 
-FEEDS=[
-    ("Bedroom Producers Blog","https://bedroomproducersblog.com/feed/"),
-    ("SoundShockAudio","https://soundshockaudio.com/feed/"),
+FEEDS = [
+    ("Bedroom Producers Blog", "https://bedroomproducersblog.com/feed/"),
+    ("SoundShockAudio", "https://soundshockaudio.com/feed/"),
 ]
 
-CATEGORY_RULES = [
-    ("🎤 VOCALS", ["vocal","vocals","voice","acapella","acapellas"]),
-    ("🎹 PRESETS", ["preset","presets","serum preset","vital preset","sylenth preset","massive preset","spire preset"]),
-    ("🥁 SAMPLES", ["sample pack","samples","drum kit","drum pack","one-shot","one shot","loops","loop pack","sound pack","sound library"]),
-    ("🔌 PLUGINS", ["vst","vst3","audio plugin","plugin","effect plugin","synth plugin","instrument plugin","au plugin"]),
-    ("🎛️ MIDI / TEMPLATES", ["midi","midi pack","midi files","template","templates","project file","project files"]),
-    ("🎼 KONTAKT", ["kontakt","decent sampler","sfz library"]),
+CATEGORIES = {
+    "🎤 VOCALS": ["vocal", "vocals", "voice", "acapella", "acapellas"],
+    "🎹 PRESETS": ["preset", "presets", "serum preset", "vital preset", "sylenth preset", "massive preset", "spire preset"],
+    "🥁 SAMPLES": ["sample pack", "samples", "drum kit", "drum pack", "one-shot", "one shot", "loop pack", "loops", "sound pack", "sound library"],
+    "🔌 PLUGINS": ["free vst", "vst plugin", "vst3", "audio plugin", "plugin", "effect plugin", "synth plugin", "instrument plugin"],
+    "🎛️ MIDI / TEMPLATES": ["midi", "midi pack", "template", "templates", "project file", "project files"],
+    "🎼 KONTAKT": ["kontakt", "decent sampler", "sfz library"],
+}
+
+FREE = [
+    "free download", "free to download", "free plugin", "free vst",
+    "free sample pack", "free samples", "free presets", "free preset",
+    "free sound library", "free kontakt", "now free", "is free",
+    "are free", "available for free", "released for free", "freebie",
+    "giveaway", "100% free", "completely free", "totally free",
 ]
 
-HARD_REJECT = [
-    "free trial","trial version","trial","demo version","demo only",
-    "subscription","subscription required","membership required",
-    "rent-to-own","rent to own","buy now","paid","commercial license",
-    "only $","only €","only £","for $","for €","for £",
-    "discount","sale","coupon","intro offer","introductory offer",
-    "upgrade required","after the trial","after trial",
+BAD = [
+    "free trial", "trial version", "free demo", "demo version", "trial",
+    "subscription", "subscription required", "membership required",
+    "rent-to-own", "rent to own", "paid", "buy now", "commercial license",
+    "discount", "sale", "coupon", "upgrade required",
 ]
 
-LIMITED_MARKERS = [
-    "free until","free through","free for a limited time","limited time",
-    "until august","until september","until october","until november",
-    "until december","until january","until february","until march",
-    "until april","until may","until june","until july",
-]
-
-FREE_MARKERS = [
-    "free download","free to download","free plugin","free vst",
-    "free sample pack","free samples","free presets","free preset",
-    "free sound library","free kontakt","free kontakt library",
-    "now free","is free","are free","available for free",
-    "released for free","released free","giveaway","freebie",
-    "100% free","completely free","totally free","free version",
-]
-
-GENERIC_ARTICLE_MARKERS = [
-    "best ","top ","how to","guide","tutorial","review","reviews",
-    "comparison","vs ","versus","what is","explained","tips",
-    "roundup","round-up","list of","interview","podcast",
+GENERIC = [
+    "best ", "top ", "how to", "guide", "tutorial", "review",
+    "comparison", "versus", "what is", "explained", "tips",
+    "roundup", "round-up", "interview", "podcast",
 ]
 
 def clean(s):
-    return re.sub(r"\s+"," ",html.unescape(re.sub(r"<[^>]+>"," ",s or ""))).strip()
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
 
-def load():
+def load_seen():
     try:
-        return json.load(open("seen.json",encoding="utf-8"))
+        with open("seen.json", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return {}
 
-def save(x):
-    with open("seen.json","w",encoding="utf-8") as f:
-        json.dump(x,f,ensure_ascii=False)
+def save_seen(seen):
+    with open("seen.json", "w", encoding="utf-8") as f:
+        json.dump(seen, f, ensure_ascii=False)
 
-def tg(text,url):
-    data=json.dumps({
-        "chat_id":CHANNEL,
-        "text":text+"\n\n🔗 "+url,
-        "parse_mode":"HTML",
-        "disable_web_page_preview":False
-    }).encode()
-    req=Request(
-        "https://api.telegram.org/bot"+TOKEN+"/sendMessage",
-        data=data,
-        headers={"Content-Type":"application/json"}
-    )
-    urlopen(req,timeout=20).read()
-
-def feed(url):
-    raw=urlopen(
-        Request(url,headers={"User-Agent":"GPTNewsRelay/2.0"}),
-        timeout=20
+def get_feed(source_url):
+    raw = urlopen(
+        Request(source_url, headers={"User-Agent": "GPTNewsRelay/3.0"}),
+        timeout=10
     ).read()
-    root=ET.fromstring(raw)
-    out=[]
+
+    root = ET.fromstring(raw)
+    items = []
 
     for x in root.findall(".//item"):
-        title=clean(x.findtext("title"))
-        link=clean(x.findtext("link"))
-        desc=clean(x.findtext("description"))
+        title = clean(x.findtext("title"))
+        link = clean(x.findtext("link"))
+        desc = clean(x.findtext("description"))
         if title and link:
-            out.append((title,link,desc))
+            items.append((title, link, desc))
 
-    if not out:
-        ns={"a":"http://www.w3.org/2005/Atom"}
-        for x in root.findall(".//a:entry",ns):
-            title=clean(x.findtext("a:title",default="",namespaces=ns))
-            link_el=x.find("a:link",ns)
-            link=link_el.attrib.get("href","") if link_el is not None else ""
-            desc=clean(
-                x.findtext("a:summary",default="",namespaces=ns)
-                or x.findtext("a:content",default="",namespaces=ns)
+    # Atom fallback
+    if not items:
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        for x in root.findall(".//a:entry", ns):
+            title = clean(x.findtext("a:title", "", ns))
+            link_el = x.find("a:link", ns)
+            link = link_el.attrib.get("href", "") if link_el is not None else ""
+            desc = clean(
+                x.findtext("a:summary", "", ns)
+                or x.findtext("a:content", "", ns)
             )
             if title and link:
-                out.append((title,link,desc))
+                items.append((title, link, desc))
 
-    return out[-30:]
+    return items[-30:]
 
-def category(title,desc):
-    text=(title+" "+desc).lower()
+def classify(title, desc):
+    text = (title + " " + desc).lower()
 
-    if any(x in title.lower() for x in GENERIC_ARTICLE_MARKERS):
+    if any(x in title.lower() for x in GENERIC):
         return None
 
-    for tag,words in CATEGORY_RULES:
+    for tag, words in CATEGORIES.items():
         if any(w in text for w in words):
             return tag
+
     return None
 
-def is_free(title,desc):
-    title_l=title.lower()
-    text=(title+" "+desc).lower()
+def is_free(title, desc):
+    text = (title + " " + desc).lower()
 
-    if any(x in text for x in HARD_REJECT):
-        return False,False
+    if any(x in text for x in BAD):
+        return False
 
-    title_has_free=any(x in title_l for x in FREE_MARKERS) or bool(
-        re.search(r"\bFREE\b",title,re.I)
+    return any(x in text for x in FREE) or bool(re.search(r"\bFREE\b", title, re.I))
+
+def send_telegram(text, url):
+    payload = json.dumps({
+        "chat_id": CHANNEL,
+        "text": text + "\n\n🔗 " + url,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
+    }).encode()
+
+    req = Request(
+        "https://api.telegram.org/bot" + TOKEN + "/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+    urlopen(req, timeout=15).read()
+
+def make_post(tag, title, desc, source):
+    desc = clean(desc)
+    if len(desc) > 600:
+        desc = desc[:597] + "..."
+
+    out = [
+        tag,
+        "",
+        "<b>" + html.escape(title) + "</b>",
+    ]
+
+    if desc:
+        out += ["", html.escape(desc)]
+
+    out += [
+        "",
+        "🆓 <b>FREE</b>",
+        "📌 " + html.escape(source),
+    ]
+
+    return "\n".join(out)
+
+def check_source(item):
+    source, url = item
+    try:
+        return source, get_feed(url), None
+    except Exception as e:
+        return source, [], str(e)
+
+def main():
+    if not TOKEN:
+        print("ERROR: TELEGRAM_BOT_TOKEN is missing")
+        return 1
+
+    seen = load_seen()
+    published = 0
+    skipped = 0
+    errors = []
+
+    print("CHECKING FEEDS...", flush=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(FEEDS)) as pool:
+        results = list(pool.map(check_source, FEEDS))
+
+    for source, items, error in results:
+        if error:
+            print("FEED ERROR", source, error, flush=True)
+            errors.append(source + ": " + error)
+            continue
+
+        print("FOUND", len(items), "items from", source, flush=True)
+
+        for title, link, desc in items:
+            key = hashlib.sha256(link.encode()).hexdigest()
+
+            if key in seen:
+                continue
+
+            tag = classify(title, desc)
+
+            if not tag:
+                skipped += 1
+                seen[key] = int(time.time())
+                continue
+
+            if not is_free(title, desc):
+                skipped += 1
+                seen[key] = int(time.time())
+                continue
+
+            try:
+                send_telegram(make_post(tag, title, desc, source), link)
+
+                # Mark as seen ONLY after successful Telegram delivery.
+                seen[key] = int(time.time())
+                published += 1
+
+                print("POSTED:", title, flush=True)
+                time.sleep(0.35)
+
+            except Exception as e:
+                errors.append("Telegram: " + str(e))
+                print("TELEGRAM ERROR:", e, flush=True)
+
+    save_seen(seen)
+
+    print(
+        "DONE",
+        "published=", published,
+        "skipped=", skipped,
+        "errors=", len(errors),
+        flush=True
     )
 
-    if not title_has_free:
-        return False,False
+    if errors:
+        for e in errors:
+            print("ERROR:", e, flush=True)
 
-    limited=any(x in text for x in LIMITED_MARKERS)
-    return True,limited
+    return 0
 
-def build_message(tag,title,desc,source,limited):
-    label="🆓 <b>FREE</b>"
-    if limited:
-        label="⏳ <b>FREE — LIMITED TIME</b>"
-
-    description=clean(desc)
-    if len(description)>650:
-        description=description[:647]+"..."
-
-    parts=[
-        tag,"",
-        "<b>"+html.escape(title)+"</b>","",
-    ]
-    if description:
-        parts.append(html.escape(description))
-    parts.extend(["",label,"📌 "+html.escape(source)])
-    return "\n".join(parts)
-
-def run():
-    if not TOKEN:
-        return {"ok":False,"error":"missing token"}
-
-    seen=load()
-    published=0
-    skipped=0
-    errors=[]
-
-    for source,url in FEEDS:
-        try:
-            items=feed(url)
-
-            for title,link,desc in items:
-                key=hashlib.sha256(link.encode()).hexdigest()
-
-                if key in seen:
-                    continue
-
-                seen[key]=int(time.time())
-
-                tag=category(title,desc)
-                if not tag:
-                    skipped+=1
-                    continue
-
-                free,limited=is_free(title,desc)
-                if not free:
-                    skipped+=1
-                    continue
-
-                try:
-                    tg(build_message(tag,title,desc,source,limited),link)
-                    published+=1
-                    time.sleep(2)
-                except Exception as e:
-                    errors.append(source+": Telegram "+str(e))
-
-        except Exception as e:
-            errors.append(source+": "+str(e))
-
-    save(seen)
-    return {
-        "ok":True,
-        "published":published,
-        "skipped":skipped,
-        "errors":errors
-    }
-
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/run"):
-            if SECRET and self.path != "/run?key="+SECRET:
-                self.send_response(403)
-                self.end_headers()
-                return
-            body=json.dumps(run(),ensure_ascii=False).encode()
-        else:
-            body=b'{"ok":true}'
-
-        self.send_response(200)
-        self.send_header("Content-Type","application/json; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self,*a):
-        pass
-
-HTTPServer(
-    ("0.0.0.0",int(os.getenv("PORT","10000"))),
-    H
-).serve_forever()
+if __name__ == "__main__":
+    raise SystemExit(main())
