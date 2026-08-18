@@ -59,6 +59,20 @@ GENERIC = [
     "explained", "video tutorial", "watch the video",
 ]
 
+EDITORIAL_DOMAINS = {
+    "musictech.com", "weareyou.com", "routenote.com", "remezcla.com",
+    "bedroomproducersblog.com", "musicradar.com", "futurecdn.net",
+    "attackmagazine.com", "musicgateway.com"
+}
+
+ARTICLE_PATTERNS = [
+    "best ", "top ", "ultimate ", "guide to", "how to",
+    "tips", "tricks", "tutorial", "review", "roundup",
+    "10 free", "20 free", "50 free", "70 free",
+    "list of", "platforms", "pack features", "anniversary pack",
+    "partners with", "offers ", "article", "news:"
+]
+
 LISTICLE = [
     "best free", "top 5", "top 10", "top 20", "top 50",
     "ultimate list", "list of", "platforms for free",
@@ -190,8 +204,8 @@ def analyze(title, desc, source=""):
 
     score = sum(v for k, v in GOOD.items() if k in text)
 
-    # Google News is a discovery layer, not a source of generic articles.
-    # For Google results we require a direct download/product announcement signal.
+    # Google News is discovery only. Reject editorial/listicle pages
+    # unless they look like a concrete product-release/download notice.
     if source_low.startswith("google:"):
         direct = [
             "free download", "download", "available for free",
@@ -202,16 +216,40 @@ def analyze(title, desc, source=""):
         if not any(x in text for x in direct):
             return False, score, [], False
 
-        # Reject listicles/tutorials/reviews that merely mention free products.
-        if any(x in text for x in LISTICLE):
-            return False, score, [], False
-        if any(x in text for x in GENERIC) and not any(
-            x in text for x in ["released", "releases", "is free", "now free", "available for free"]
-        ):
+        # The RSS result can be an editorial article that merely mentions
+        # a free product. Do not post those noisy aggregators.
+        m = re.search(r'https?://([^/\s]+)', desc)
+        host = m.group(1).lower().split(":")[0] if m else ""
+        host = host[4:] if host.startswith("www.") else host
+
+        if any(host == d or host.endswith("." + d) for d in EDITORIAL_DOMAINS):
+            # Allow BPB only when the title itself is clearly a concrete free
+            # product/sample/preset/plugin release, not a listicle.
+            if host.endswith("bedroomproducersblog.com"):
+                concrete = any(x in title.lower() for x in [
+                    "free sample pack", "free plugin", "free vst",
+                    "free presets", "free preset", "free drum", "free vocal"
+                ])
+                if not concrete:
+                    return False, score, [], False
+            else:
+                return False, score, [], False
+
+        if any(x in text for x in LISTICLE) or any(x in title.lower() for x in ARTICLE_PATTERNS):
             return False, score, [], False
 
     # For all sources, weak generic articles are not enough.
-    if any(x in text for x in GENERIC) and score < 16:
+    if any(x in text for x in GENERIC) and score < 18:
+        return False, score, [], False
+
+    # If the title is clearly a list/article headline, reject it globally.
+    title_low = title.lower()
+    if any(x in title_low for x in [
+        "best free", "top 5", "top 10", "top 20", "ultimate list",
+        "free sample downloads:", "free samples:", "free vocals:",
+        "free drum kits:", "free vst downloads:", "free plugins:",
+        "guide", "roundup"
+    ]):
         return False, score, [], False
 
     limited = any(x in text for x in LIMITED)
@@ -312,7 +350,7 @@ def main():
     errors = 0
     candidates = []
 
-    print("START FAST MULTI-SOURCE SCAN v9 QUALITY FILTER", flush=True)
+    print("START FAST MULTI-SOURCE SCAN v10 PRODUCT FILTER", flush=True)
 
     # Параллельно читаем источники — поэтому релей больше не должен
     # ждать каждый RSS по очереди.
