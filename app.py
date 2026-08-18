@@ -1,239 +1,228 @@
-import os
-import json
-import time
-import hashlib
-import re
-import html
-import urllib.request
+import os,time,json,hashlib,re,html
+from http.server import BaseHTTPRequestHandler,HTTPServer
+from urllib.request import Request,urlopen
+from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@gptnews999")
+TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
+CHANNEL=os.getenv("TELEGRAM_CHANNEL","@gptnews999")
+SECRET=os.getenv("RELAY_SECRET","")
 
-FEEDS = [
-    ("SoundShockAudio", "https://soundshockaudio.com/feed/"),
-    ("Bedroom Producers Blog", "https://bedroomproducersblog.com/feed/"),
+FEEDS=[
+    ("SoundShockAudio","https://soundshockaudio.com/feed/"),
+    ("Bedroom Producers Blog","https://bedroomproducersblog.com/feed/")
 ]
 
-POSITIVE = {
-    "vocal": 8,
-    "vocals": 8,
-    "vocal pack": 10,
-    "sample pack": 7,
-    "samples": 5,
-    "serum": 6,
-    "vital": 6,
-    "preset": 7,
-    "presets": 7,
-    "minimal": 5,
-    "minimal house": 8,
-    "house": 3,
-    "vst": 5,
-    "plugin": 5,
-    "drum": 5,
-    "one-shot": 5,
-    "one shot": 5,
-    "royalty-free": 5,
-    "free download": 8,
-    "free": 3,
+POS={
+    "vocal":8,"vocals":8,"vocal pack":10,
+    "sample pack":7,"samples":5,
+    "serum":6,"vital":6,
+    "preset":7,"presets":7,
+    "minimal":5,"house":3,
+    "vst":5,"plugin":5,
+    "drum":5,"one-shot":5,
+    "royalty-free":5,"free download":6,"free":3
 }
 
-NEGATIVE = {
-    "trial": -20,
-    "free trial": -30,
-    "demo": -15,
-    "subscription": -25,
-    "subscription required": -30,
-    "paid": -12,
-    "buy now": -15,
-    "monthly": -15,
-    "annual": -15,
-    "per month": -15,
-    "7-day trial": -30,
-    "14-day trial": -30,
-    "30-day trial": -30,
+NEG={
+    "trial":-12,"demo":-10,
+    "free trial":-15,
+    "subscription":-12,
+    "paid":-8,"buy now":-8
 }
 
+def clean(s):
+    return re.sub(
+        r"\s+"," ",
+        html.unescape(re.sub(r"<[^>]+>"," ",s or ""))
+    ).strip()
 
-def clean(text):
-    text = html.unescape(text or "")
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+def score(t):
+    t=t.lower()
+    s=sum(v for k,v in POS.items() if k in t)
+    s+=sum(v for k,v in NEG.items() if k in t)
 
-
-def score(text):
-    text = text.lower()
-
-    value = 0
-
-    for word, points in POSITIVE.items():
-        if word in text:
-            value += points
-
-    for word, points in NEGATIVE.items():
-        if word in text:
-            value += points
-
-    return value
-
-
-def load_seen():
-    try:
-        with open("seen.json", "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_seen(seen):
-    with open("seen.json", "w", encoding="utf-8") as f:
-        json.dump(seen, f, ensure_ascii=False, indent=2)
-
-
-def telegram_send(text, url):
-    data = json.dumps({
-        "chat_id": CHANNEL,
-        "text": text + "\n\n🔗 " + url,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }).encode("utf-8")
-
-    request = urllib.request.Request(
-        "https://api.telegram.org/bot" + TOKEN + "/sendMessage",
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
-
-    with urllib.request.urlopen(request, timeout=30) as response:
-        response.read()
-
-
-def get_feed(url):
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "GPTNewsRelay/1.0"}
-    )
-
-    with urllib.request.urlopen(request, timeout=30) as response:
-        raw = response.read()
-
-    root = ET.fromstring(raw)
-
-    result = []
-
-    for item in root.findall(".//item"):
-        title = clean(item.findtext("title"))
-        link = clean(item.findtext("link"))
-        description = clean(item.findtext("description"))
-
-        if title and link:
-            result.append((title, link, description))
-
-    return result[-30:]
-
-
-def get_category(text):
-    text = text.lower()
-
-    if "vocal" in text:
-        return "🎤 VOCALS"
-
-    if any(x in text for x in ["preset", "serum", "vital"]):
-        return "🎹 PRESETS"
-
-    if any(x in text for x in ["sample", "drum", "one-shot", "one shot"]):
-        return "🥁 SAMPLES"
-
-    if any(x in text for x in ["vst", "plugin"]):
-        return "🔌 PLUGINS"
-
-    return "🎛️ MUSIC PRODUCTION"
-
-
-def is_trial_or_paid(text):
-    text = text.lower()
-
-    blocked = [
+    if any(x in t for x in (
         "free trial",
         "subscription required",
-        "trial version",
-        "trial version available",
         "7-day trial",
         "14-day trial",
-        "30-day trial",
-        "monthly subscription",
-        "annual subscription",
-        "paid subscription",
-        "requires subscription",
-    ]
+        "30-day trial"
+    )):
+        s-=30
 
-    return any(x in text for x in blocked)
+    return s
 
+def translate(text):
+    if not text:
+        return ""
+
+    try:
+        url=(
+            "https://translate.googleapis.com/translate_a/single"
+            "?client=gtx&sl=auto&tl=ru&dt=t&q="+quote(text[:4000])
+        )
+
+        req=Request(
+            url,
+            headers={"User-Agent":"Mozilla/5.0"}
+        )
+
+        raw=urlopen(req,timeout=20).read().decode("utf-8")
+        data=json.loads(raw)
+
+        return "".join(
+            part[0] for part in data[0] if part[0]
+        ).strip()
+
+    except Exception as e:
+        print("TRANSLATE ERROR:",e,flush=True)
+        return text
+
+def load():
+    try:
+        return json.load(
+            open("seen.json",encoding="utf-8")
+        )
+    except:
+        return {}
+
+def save(x):
+    json.dump(
+        x,
+        open("seen.json","w",encoding="utf-8"),
+        ensure_ascii=False
+    )
+
+def tg(text,url):
+    data=json.dumps({
+        "chat_id":CHANNEL,
+        "text":text+"\n\n🔗 "+url,
+        "parse_mode":"HTML",
+        "disable_web_page_preview":False
+    }).encode()
+
+    req=Request(
+        "https://api.telegram.org/bot"+TOKEN+"/sendMessage",
+        data=data,
+        headers={"Content-Type":"application/json"}
+    )
+
+    urlopen(req,timeout=20).read()
+
+def feed(url):
+    raw=urlopen(
+        Request(
+            url,
+            headers={"User-Agent":"GPTNewsRelay/1.0"}
+        ),
+        timeout=20
+    ).read()
+
+    root=ET.fromstring(raw)
+    out=[]
+
+    for x in root.findall(".//item"):
+        title=clean(x.findtext("title"))
+        link=clean(x.findtext("link"))
+        desc=clean(x.findtext("description"))
+
+        if title and link:
+            out.append((title,link,desc))
+
+    return out[-20:]
 
 def run():
     if not TOKEN:
-        print("ERROR: TELEGRAM_BOT_TOKEN is missing")
-        return
+        return {"ok":False,"error":"missing token"}
 
-    seen = load_seen()
-    published = 0
+    seen=load()
+    n=0
 
-    for source, feed_url in FEEDS:
+    for source,url in FEEDS:
         try:
-            articles = get_feed(feed_url)
+            for title,link,desc in feed(url):
 
-            for title, link, description in articles:
-                article_id = hashlib.sha256(link.encode()).hexdigest()
+                k=hashlib.sha256(
+                    link.encode()
+                ).hexdigest()
 
-                if article_id in seen:
+                if k in seen:
                     continue
 
-                full_text = f"{title} {description}"
-                current_score = score(full_text)
+                text=title+" "+desc
+                seen[k]=int(time.time())
 
-                # Отбрасываем trial / subscription / paid предложения
-                if is_trial_or_paid(full_text):
-                    print("SKIP PAID/TRIAL:", title)
-                    seen[article_id] = int(time.time())
+                if score(text)<5:
                     continue
 
-                # Нужен достаточно релевантный материал
-                if current_score < 5:
-                    print("SKIP LOW SCORE:", title)
-                    seen[article_id] = int(time.time())
-                    continue
+                low=text.lower()
 
-                category = get_category(full_text)
+                if "vocal" in low:
+                    tag="🎤 VOCALS"
+                elif any(x in low for x in ("preset","serum","vital")):
+                    tag="🎹 PRESETS"
+                elif any(x in low for x in ("sample","drum")):
+                    tag="🥁 SAMPLES"
+                elif any(x in low for x in ("vst","plugin")):
+                    tag="🔌 PLUGIN"
+                else:
+                    tag="🎛️ MUSIC PRODUCTION"
 
-                message = (
-                    f"{category}\n\n"
-                    f"<b>{html.escape(title)}</b>\n\n"
-                    f"{html.escape(description[:600])}\n\n"
+                ru_title=translate(title)
+                ru_desc=translate(desc[:1500])
+
+                message=(
+                    f"{tag}\n\n"
+                    f"<b>{html.escape(ru_title)}</b>\n\n"
+                    f"{html.escape(ru_desc[:700])}\n\n"
                     f"🆓 <b>FREE</b>\n"
                     f"📌 {html.escape(source)}"
                 )
 
-                try:
-                    telegram_send(message, link)
+                tg(message,link)
 
-                    seen[article_id] = int(time.time())
-                    published += 1
+                n+=1
+                time.sleep(3)
 
-                    print("PUBLISHED:", title)
+        except Exception as e:
+            print(source,e,flush=True)
 
-                    time.sleep(2)
+    save(seen)
 
-                except Exception as error:
-                    print("TELEGRAM ERROR:", error)
+    return {
+        "ok":True,
+        "published":n
+    }
 
-        except Exception as error:
-            print("FEED ERROR:", source, error)
+class H(BaseHTTPRequestHandler):
 
-    save_seen(seen)
+    def do_GET(self):
 
-    print("DONE. Published:", published)
+        if self.path.startswith("/run"):
 
+            if SECRET and self.path != "/run?key="+SECRET:
+                self.send_response(403)
+                self.end_headers()
+                return
 
-if __name__ == "__main__":
-    run()
+            body=json.dumps(run()).encode()
+
+        else:
+            body=b'{"ok":true}'
+
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            "application/json"
+        )
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self,*a):
+        pass
+
+HTTPServer(
+    ("0.0.0.0",int(os.getenv("PORT","10000"))),
+    H
+).serve_forever()
