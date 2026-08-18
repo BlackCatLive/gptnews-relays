@@ -6,7 +6,7 @@ import html
 import re
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 from xml.etree import ElementTree as ET
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -161,6 +161,26 @@ def bpb_is_free(title, desc):
         or "free vst" in text
     )
 
+
+def translate_ru(text):
+    """Translate short English titles to Russian without an API key."""
+    text = clean(text)
+    if not text:
+        return text
+    try:
+        url = (
+            "https://translate.googleapis.com/translate_a/single?client=gtx"
+            "&sl=auto&tl=ru&dt=t&q=" + quote(text)
+        )
+        raw = fetch(url)
+        data = json.loads(raw.decode("utf-8"))
+        translated = "".join(part[0] for part in data[0] if part and part[0])
+        return translated.strip() or text
+    except Exception as e:
+        print("TRANSLATION ERROR:", e, flush=True)
+        return text
+
+
 def send_telegram(text, url):
     payload = json.dumps({
         "chat_id": CHANNEL,
@@ -180,10 +200,11 @@ def send_telegram(text, url):
 
 def post(tag, title, url, source):
     title = clean(title)
+    ru_title = translate_ru(title)
 
     text = (
         f"{tag}\n\n"
-        f"<b>{html.escape(title)}</b>\n\n"
+        f"<b>{html.escape(ru_title)}</b>\n\n"
         f"🆓 <b>FREE</b>\n"
         f"📌 {html.escape(source)}"
     )
@@ -281,3 +302,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
