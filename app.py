@@ -1,228 +1,91 @@
-import os,time,json,hashlib,re,html
-from http.server import BaseHTTPRequestHandler,HTTPServer
-from urllib.request import Request,urlopen
-from urllib.parse import quote
+import os,time,json,hashlib,re,html,urllib.request,urllib.parse
 from xml.etree import ElementTree as ET
 
 TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 CHANNEL=os.getenv("TELEGRAM_CHANNEL","@gptnews999")
-SECRET=os.getenv("RELAY_SECRET","")
+FEEDS=[("SoundShockAudio","https://soundshockaudio.com/feed/"),("Bedroom Producers Blog","https://bedroomproducersblog.com/feed/")]
 
-FEEDS=[
-    ("SoundShockAudio","https://soundshockaudio.com/feed/"),
-    ("Bedroom Producers Blog","https://bedroomproducersblog.com/feed/")
-]
-
-POS={
-    "vocal":8,"vocals":8,"vocal pack":10,
-    "sample pack":7,"samples":5,
-    "serum":6,"vital":6,
-    "preset":7,"presets":7,
-    "minimal":5,"house":3,
-    "vst":5,"plugin":5,
-    "drum":5,"one-shot":5,
-    "royalty-free":5,"free download":6,"free":3
-}
-
-NEG={
-    "trial":-12,"demo":-10,
-    "free trial":-15,
-    "subscription":-12,
-    "paid":-8,"buy now":-8
-}
+POS={"vocal":8,"vocals":8,"vocal pack":10,"sample pack":7,"samples":5,"serum":6,"vital":6,"preset":7,"presets":7,"minimal":5,"minimal house":8,"deep house":5,"tech house":4,"house":3,"vst":5,"vst3":5,"plugin":5,"drum":5,"one-shot":5,"one shot":5,"midi":5,"loop":5,"loops":5,"project file":5,"royalty-free":5,"free download":7,"free":3}
+NEG={"trial":-20,"demo":-15,"free trial":-30,"subscription":-25,"subscription required":-30,"paid":-12,"buy now":-15,"monthly subscription":-20,"annual subscription":-20,"per month":-15,"crack":-50,"pirated":-50,"torrent":-50}
+BLOCKED=("free trial","subscription required","trial version","7-day trial","14-day trial","30-day trial","monthly subscription","annual subscription","requires subscription","paid subscription")
 
 def clean(s):
-    return re.sub(
-        r"\s+"," ",
-        html.unescape(re.sub(r"<[^>]+>"," ",s or ""))
-    ).strip()
+    return re.sub(r"\\s+"," ",html.unescape(re.sub(r"<[^>]+>"," ",s or ""))).strip()
 
 def score(t):
     t=t.lower()
-    s=sum(v for k,v in POS.items() if k in t)
-    s+=sum(v for k,v in NEG.items() if k in t)
+    return sum(v for k,v in POS.items() if k in t)+sum(v for k,v in NEG.items() if k in t)
 
-    if any(x in t for x in (
-        "free trial",
-        "subscription required",
-        "7-day trial",
-        "14-day trial",
-        "30-day trial"
-    )):
-        s-=30
-
-    return s
-
-def translate(text):
-    if not text:
-        return ""
-
+def translate(s):
+    s=clean(s)
+    if not s: return ""
+    if len(re.findall(r"[Ð-Ð¯Ð°-ÑÐÑ]",s))>len(re.findall(r"[A-Za-z]",s)): return s
     try:
-        url=(
-            "https://translate.googleapis.com/translate_a/single"
-            "?client=gtx&sl=auto&tl=ru&dt=t&q="+quote(text[:4000])
-        )
-
-        req=Request(
-            url,
-            headers={"User-Agent":"Mozilla/5.0"}
-        )
-
-        raw=urlopen(req,timeout=20).read().decode("utf-8")
-        data=json.loads(raw)
-
-        return "".join(
-            part[0] for part in data[0] if part[0]
-        ).strip()
-
+        q=urllib.parse.urlencode({"client":"gtx","sl":"auto","tl":"ru","dt":"t","q":s[:3500]})
+        req=urllib.request.Request("https://translate.googleapis.com/translate_a/single?"+q,headers={"User-Agent":"Mozilla/5.0"})
+        data=json.loads(urllib.request.urlopen(req,timeout=20).read().decode())
+        return "".join(x[0] for x in data[0] if x and x[0]).strip() or s
     except Exception as e:
-        print("TRANSLATE ERROR:",e,flush=True)
-        return text
+        print("TRANSLATE ERROR",e); return s
 
 def load():
-    try:
-        return json.load(
-            open("seen.json",encoding="utf-8")
-        )
-    except:
-        return {}
+    try: return json.load(open("seen.json",encoding="utf-8"))
+    except: return {}
 
-def save(x):
-    json.dump(
-        x,
-        open("seen.json","w",encoding="utf-8"),
-        ensure_ascii=False
-    )
+def save(x): json.dump(x,open("seen.json","w",encoding="utf-8"),ensure_ascii=False,indent=2)
 
 def tg(text,url):
-    data=json.dumps({
-        "chat_id":CHANNEL,
-        "text":text+"\n\n🔗 "+url,
-        "parse_mode":"HTML",
-        "disable_web_page_preview":False
-    }).encode()
-
-    req=Request(
-        "https://api.telegram.org/bot"+TOKEN+"/sendMessage",
-        data=data,
-        headers={"Content-Type":"application/json"}
-    )
-
-    urlopen(req,timeout=20).read()
+    data=json.dumps({"chat_id":CHANNEL,"text":text+"\n\nð "+url,"parse_mode":"HTML","disable_web_page_preview":False}).encode()
+    req=urllib.request.Request("https://api.telegram.org/bot"+TOKEN+"/sendMessage",data=data,headers={"Content-Type":"application/json"})
+    urllib.request.urlopen(req,timeout=30).read()
 
 def feed(url):
-    raw=urlopen(
-        Request(
-            url,
-            headers={"User-Agent":"GPTNewsRelay/1.0"}
-        ),
-        timeout=20
-    ).read()
-
-    root=ET.fromstring(raw)
-    out=[]
-
+    raw=urllib.request.urlopen(urllib.request.Request(url,headers={"User-Agent":"GPTNewsRelay/2.0"}),timeout=30).read()
+    root=ET.fromstring(raw); out=[]
     for x in root.findall(".//item"):
-        title=clean(x.findtext("title"))
-        link=clean(x.findtext("link"))
-        desc=clean(x.findtext("description"))
+        a,b,c=clean(x.findtext("title")),clean(x.findtext("link")),clean(x.findtext("description"))
+        if a and b: out.append((a,b,c))
+    return out[-30:]
 
-        if title and link:
-            out.append((title,link,desc))
-
-    return out[-20:]
+def tags(t):
+    t=t.lower(); r=[]
+    def add(x):
+        if x not in r: r.append(x)
+    if "vocal" in t: add("#VOCALS")
+    if any(x in t for x in ("preset","serum","vital","synth preset")): add("#PRESETS")
+    if any(x in t for x in ("sample pack","samples","drum kit","drum pack")): add("#SAMPLES")
+    if any(x in t for x in ("vst","vst3","plugin")): add("#VST")
+    if "midi" in t: add("#MIDI")
+    if "loop" in t: add("#LOOPS")
+    if any(x in t for x in ("project file","project files","flp","ableton project")): add("#PROJECTS")
+    if any(x in t for x in ("news","release","released","announcement","update")): add("#NEWS")
+    if "minimal" in t: add("#MINIMAL")
+    if "deep house" in t: add("#DEEPHOUSE")
+    if "tech house" in t: add("#TECHHOUSE")
+    if "house" in t and not any(x in r for x in ("#DEEPHOUSE","#TECHHOUSE")): add("#HOUSE")
+    if any(x in t for x in ("free","$0","0.00","free download","royalty-free")): add("#FREE")
+    if not r: add("#OTHER")
+    return " ".join(r)
 
 def run():
-    if not TOKEN:
-        return {"ok":False,"error":"missing token"}
-
-    seen=load()
-    n=0
-
+    if not TOKEN: print("ERROR: TELEGRAM_BOT_TOKEN missing"); return
+    seen=load(); published=0
     for source,url in FEEDS:
         try:
             for title,link,desc in feed(url):
+                k=hashlib.sha256(link.encode()).hexdigest()
+                if k in seen: continue
+                text=title+" "+desc; low=text.lower()
+                if any(x in low for x in BLOCKED) or score(text)<5:
+                    seen[k]=int(time.time()); continue
+                ru_title=translate(title); ru_desc=translate(desc[:1600])
+                msg=f"{tags(text)}\n\n<b>{html.escape(ru_title)}</b>\n\n{html.escape(ru_desc[:800])}\n\nð <b>FREE</b>\nð {html.escape(source)}"
+                try:
+                    tg(msg,link); seen[k]=int(time.time()); published+=1; time.sleep(3)
+                    print("PUBLISHED",title)
+                except Exception as e: print("TELEGRAM ERROR",e)
+        except Exception as e: print("FEED ERROR",source,e)
+    if len(seen)>5000: seen=dict(list(seen.items())[-3500:])
+    save(seen); print("DONE",published)
 
-                k=hashlib.sha256(
-                    link.encode()
-                ).hexdigest()
-
-                if k in seen:
-                    continue
-
-                text=title+" "+desc
-                seen[k]=int(time.time())
-
-                if score(text)<5:
-                    continue
-
-                low=text.lower()
-
-                if "vocal" in low:
-                    tag="🎤 VOCALS"
-                elif any(x in low for x in ("preset","serum","vital")):
-                    tag="🎹 PRESETS"
-                elif any(x in low for x in ("sample","drum")):
-                    tag="🥁 SAMPLES"
-                elif any(x in low for x in ("vst","plugin")):
-                    tag="🔌 PLUGIN"
-                else:
-                    tag="🎛️ MUSIC PRODUCTION"
-
-                ru_title=translate(title)
-                ru_desc=translate(desc[:1500])
-
-                message=(
-                    f"{tag}\n\n"
-                    f"<b>{html.escape(ru_title)}</b>\n\n"
-                    f"{html.escape(ru_desc[:700])}\n\n"
-                    f"🆓 <b>FREE</b>\n"
-                    f"📌 {html.escape(source)}"
-                )
-
-                tg(message,link)
-
-                n+=1
-                time.sleep(3)
-
-        except Exception as e:
-            print(source,e,flush=True)
-
-    save(seen)
-
-    return {
-        "ok":True,
-        "published":n
-    }
-
-class H(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-
-        if self.path.startswith("/run"):
-
-            if SECRET and self.path != "/run?key="+SECRET:
-                self.send_response(403)
-                self.end_headers()
-                return
-
-            body=json.dumps(run()).encode()
-
-        else:
-            body=b'{"ok":true}'
-
-        self.send_response(200)
-        self.send_header(
-            "Content-Type",
-            "application/json"
-        )
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self,*a):
-        pass
-
-HTTPServer(
-    ("0.0.0.0",int(os.getenv("PORT","10000"))),
-    H
-).serve_forever()
+if __name__=="__main__": run()
