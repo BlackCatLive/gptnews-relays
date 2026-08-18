@@ -178,13 +178,17 @@ def genre_tier(genres):
 def classify(item):
     main_text = (item["title"] + " " + item["description"]).lower()
     hint = (item.get("hint") or "").lower()
+    source = (item.get("source") or "").lower()
     text = main_text + " " + hint
 
     resource_hits = [term for term in RESOURCE if term in main_text]
     if not resource_hits:
         return -999, [], [], "not-resource"
 
-    if not any(term in main_text for term in FREE_WORDS):
+    free_from_hint = any(
+        x in source for x in ("free", "minimal", "rominimal", "deep tech", "tech house", "house vocals")
+    )
+    if not any(term in main_text for term in FREE_WORDS) and not free_from_hint:
         return -999, [], [], "no-free-signal"
 
     if any(term in main_text for term in BAD):
@@ -211,7 +215,10 @@ def classify(item):
         "free plugin", "free sample", "free samples", "free preset",
         "free presets", "free drum kit", "one-shot", "one shot",
     ))
-    if not direct_resource:
+    resource_from_hint = any(
+        x in source for x in ("free vst", "free samples", "free sample", "serum", "vital", "vocals", "samples")
+    )
+    if not direct_resource and not resource_from_hint:
         return -999, [], [], "not-direct-resource"
 
     genres = [term for term in GENRES if term in text]
@@ -377,6 +384,7 @@ def main():
 
     candidates = []
     rejected = 0
+    rejection_reasons = Counter()
 
     for item in unique.values():
         if fingerprint(item) in seen:
@@ -388,10 +396,12 @@ def main():
             candidates.append((score, item, genres, categories))
         else:
             rejected += 1
+            rejection_reasons[reason] += 1
 
     candidates.sort(key=lambda x: x[0], reverse=True)
 
     print(f"CANDIDATES={len(candidates)} REJECTED={rejected}")
+    print("REJECTION_REASONS=" + json.dumps(dict(rejection_reasons), ensure_ascii=False))
 
     posted = 0
     errors = 0
@@ -424,4 +434,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
