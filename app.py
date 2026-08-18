@@ -45,6 +45,32 @@ GOOD = {
 }
 
 # Жёстко исключаем пробные версии и подписки.
+
+# 🎯 Genre targeting — prioritise the user's Minimal/Deep/Rominimal House workflow.
+GENRE_STRONG = {
+    "minimal house": 20, "deep minimal": 18, "rominimal": 20,
+    "romanian minimal": 18, "microhouse": 17, "micro house": 17,
+    "minimal": 10, "minimal tech": 14, "minimal techno": 10,
+    "deep house": 12, "deep tech": 12, "tech house": 10,
+    "underground house": 8, "club house": 7, "house music": 5,
+    "groove": 5, "groovy": 5, "rolling": 4, "percussive": 6,
+    "percussion": 5,
+}
+GENRE_NEGATIVE = {
+    "dubstep": -14, "brostep": -16, "hardstyle": -13,
+    "drum and bass": -8, "dnb": -8, "metal": -10, "rock": -8,
+    "orchestral": -7, "cinematic": -6, "trap": -5,
+}
+PRODUCT_PRIORITY = {
+    "vocal pack": 22, "vocal samples": 20, "acapella": 20, "acapellas": 20,
+    "vocals": 16, "vocal": 14,
+    "serum presets": 20, "serum preset": 18,
+    "vital presets": 20, "vital preset": 18,
+    "sample pack": 16, "samples": 8, "drum kit": 11,
+    "one-shot": 10, "one shot": 10, "loops": 8,
+    "vst": 7, "plugin": 7, "synth": 8, "midi": 6,
+}
+
 BAD = [
     "free trial", "trial version", "trial plugin", "trial",
     "demo version", "demo only", "subscription required",
@@ -174,6 +200,20 @@ def translate_ru(text):
         return text
 
 
+
+def genre_score(title, desc):
+    text = (title + " " + desc).lower()
+    return (
+        sum(v for k, v in GENRE_STRONG.items() if k in text)
+        + sum(v for k, v in GENRE_NEGATIVE.items() if k in text)
+    )
+
+
+def product_priority(title, desc):
+    text = (title + " " + desc).lower()
+    return sum(v for k, v in PRODUCT_PRIORITY.items() if k in text)
+
+
 def analyze(title, desc, source=""):
     text = (title + " " + desc).lower()
     source_low = source.lower()
@@ -202,40 +242,49 @@ def analyze(title, desc, source=""):
     if not any(k in text for k in product_terms):
         return False, 0, [], False
 
-    score = sum(v for k, v in GOOD.items() if k in text)
+    score = sum(v for k, v in GOOD.items() if k in text) + genre_score(title, desc) + product_priority(title, desc)
 
     # Google News is discovery only. Reject editorial/listicle pages
     # unless they look like a concrete product-release/download notice.
     if source_low.startswith("google:"):
-        direct = [
-            "free download", "download", "available for free",
-            "released", "releases", "is free", "now free",
-            "free plugin", "free vst", "free sample pack",
-            "free vocal pack", "free presets", "free preset"
-        ]
-        if not any(x in text for x in direct):
-            return False, score, [], False
-
-        # The RSS result can be an editorial article that merely mentions
-        # a free product. Do not post those noisy aggregators.
+        # Google is ONLY a discovery engine. We do not publish the Google
+        # result itself because it is often an editorial article about a free
+        # product rather than the actual product/download page.
+        #
+        # For now, Google candidates are accepted only when the result points
+        # to a trusted production/download source.
         m = re.search(r'https?://([^/\s]+)', desc)
         host = m.group(1).lower().split(":")[0] if m else ""
         host = host[4:] if host.startswith("www.") else host
 
-        if any(host == d or host.endswith("." + d) for d in EDITORIAL_DOMAINS):
-            # Allow BPB only when the title itself is clearly a concrete free
-            # product/sample/preset/plugin release, not a listicle.
-            if host.endswith("bedroomproducersblog.com"):
-                concrete = any(x in title.lower() for x in [
-                    "free sample pack", "free plugin", "free vst",
-                    "free presets", "free preset", "free drum", "free vocal"
-                ])
-                if not concrete:
-                    return False, score, [], False
-            else:
-                return False, score, [], False
+        TRUSTED_GOOGLE_HOSTS = {
+            "bedroomproducersblog.com",
+            "rekkerd.org",
+            "kvraudio.com",
+            "plugins4free.com",
+            "vstplanet.com",
+            "freevstplugins.net",
+            "vst4free.com",
+            "samplefocus.com",
+            "freesound.org",
+            "99sounds.org",
+            "musicradar.com",
+        }
 
-        if any(x in text for x in LISTICLE) or any(x in title.lower() for x in ARTICLE_PATTERNS):
+        if not host or not any(
+            host == d or host.endswith("." + d)
+            for d in TRUSTED_GOOGLE_HOSTS
+        ):
+            return False, score, [], False
+
+        # Even trusted domains can contain editorial/listicle pages.
+        title_low = title.lower()
+        if any(x in title_low for x in [
+            "best free", "top 5", "top 10", "top 20", "ultimate list",
+            "free sample downloads:", "free samples:", "free vocals:",
+            "free drum kits:", "free vst downloads:", "free plugins:",
+            "guide", "roundup", "tips", "tutorial", "review"
+        ]):
             return False, score, [], False
 
     # For all sources, weak generic articles are not enough.
@@ -350,7 +399,7 @@ def main():
     errors = 0
     candidates = []
 
-    print("START FAST MULTI-SOURCE SCAN v10 PRODUCT FILTER", flush=True)
+    print("START FAST MULTI-SOURCE SCAN v12 MINIMAL HOUSE", flush=True)
 
     # Параллельно читаем источники — поэтому релей больше не должен
     # ждать каждый RSS по очереди.
@@ -384,18 +433,18 @@ def main():
 
                 # Дедупликация ещё до публикации: одна и та же статья
                 # из BPB + Google News попадёт только один раз.
-                candidates.append((score, limited, name, title, url, desc, key))
+                candidates.append((score, genre_score(title, desc), product_priority(title, desc), limited, name, title, url, desc, key))
 
     # Самое релевантное — первым.
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    candidates.sort(key=lambda x: (x[1], x[2], x[0]), reverse=True)
 
     by_source = {}
     for item in candidates:
-        by_source[item[2]] = by_source.get(item[2], 0) + 1
+        by_source[item[4]] = by_source.get(item[4], 0) + 1
     print("CANDIDATES BY SOURCE:", by_source, flush=True)
 
     MAX_POSTS_PER_RUN = 12  # safe cap; raise after quality check
-    for score, limited, source, title, url, desc, key in candidates:
+    for score, gscore, pscore, limited, source, title, url, desc, key in candidates:
         if published >= MAX_POSTS_PER_RUN:
             break
 
@@ -403,7 +452,7 @@ def main():
             make_post(title, desc, url, source, limited)
             published += 1
             print(
-                f"POSTED [{score}] {source}: {title}"
+                f"POSTED [score={score} genre={gscore} product={pscore}] {source}: {title}"
                 + (" [LIMITED]" if limited else ""),
                 flush=True
             )
