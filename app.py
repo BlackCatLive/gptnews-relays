@@ -4,87 +4,80 @@ import json
 import hashlib
 import html
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.request import Request, urlopen
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@gptnews999")
 
-# Многоисточниковый поиск: RSS + Google News RSS-поиск.
-# Google News RSS позволяет искать свежие публикации по ключевым словам,
-# а не зависеть от одного сайта.
+# Источники. KVR напрямую иногда отдаёт 403 GitHub Actions,
+# поэтому вместо него используем Google News с site:kvraudio.com.
 SOURCES = [
     ("Bedroom Producers Blog", "https://bedroomproducersblog.com/feed/"),
-    ("KVR Audio", "https://www.kvraudio.com/news-feed.php"),
     ("Rekkerd", "https://rekkerd.org/feed/"),
+    ("MusicRadar", "https://www.musicradar.com/feeds.xml"),
+    ("Sound On Sound", "https://www.soundonsound.com/news/sosrssfeed.php"),
+
     ("Google: free VST", "https://news.google.com/rss/search?q=free+VST+plugin+music+production&hl=en-US&gl=US&ceid=US:en"),
     ("Google: free samples", "https://news.google.com/rss/search?q=free+sample+pack+music+production&hl=en-US&gl=US&ceid=US:en"),
     ("Google: free vocals", "https://news.google.com/rss/search?q=free+vocal+pack+vocals+music+production&hl=en-US&gl=US&ceid=US:en"),
     ("Google: Serum presets", "https://news.google.com/rss/search?q=free+Serum+presets&hl=en-US&gl=US&ceid=US:en"),
     ("Google: Vital presets", "https://news.google.com/rss/search?q=free+Vital+presets&hl=en-US&gl=US&ceid=US:en"),
-    ("Google: free sound packs", "https://news.google.com/rss/search?q=free+drum+kit+OR+free+sound+pack+producer&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: free drum kits", "https://news.google.com/rss/search?q=free+drum+kit+one+shots+samples&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: KVR free audio", "https://news.google.com/rss/search?q=site%3Akvraudio.com+%22free%22+plugin+OR+VST+OR+soundware&hl=en-US&gl=US&ceid=US:en"),
+    ("Google: free synth presets", "https://news.google.com/rss/search?q=free+synth+presets+wavetable+producer&hl=en-US&gl=US&ceid=US:en"),
 ]
 
-# Слова, которые нужны нам для отбора.
 GOOD = {
-    "free": 5,
-    "free download": 8,
-    "free plugin": 10,
-    "free vst": 10,
-    "free sample": 9,
-    "free samples": 9,
-    "free sample pack": 12,
-    "free vocal": 14,
-    "free vocals": 14,
-    "free vocal pack": 16,
-    "free preset": 12,
-    "free presets": 12,
-    "free serum": 14,
-    "serum preset": 12,
-    "serum presets": 14,
-    "vital preset": 12,
-    "vital presets": 14,
-    "sound bank": 6,
-    "soundbank": 6,
-    "drum kit": 8,
-    "drum kit": 8,
-    "one-shot": 7,
-    "one shot": 7,
-    "loops": 5,
-    "midi": 4,
-    "royalty-free": 6,
-    "royalty free": 6,
+    "free download": 12, "free plugin": 12, "free vst": 12,
+    "free sample pack": 14, "free samples": 10, "free sample": 9,
+    "free vocal pack": 18, "free vocals": 16, "free vocal": 14,
+    "free presets": 14, "free preset": 12,
+    "serum presets": 16, "serum preset": 14,
+    "vital presets": 16, "vital preset": 14,
+    "drum kit": 9, "one-shot": 8, "one shot": 8,
+    "loops": 6, "midi": 5, "soundbank": 7, "sound bank": 7,
+    "royalty-free": 7, "royalty free": 7,
+    "free synthesizer": 10, "free synth": 10,
+    "free effect": 9, "free effects": 9,
+    "free instrument": 9,
 }
 
-# Жёсткий анти-триал. Такие материалы бот не публикует как FREE.
+# Жёстко исключаем пробные версии и подписки.
 BAD = [
-    "free trial", "trial version", "trial", "demo version", "demo plugin",
-    "subscription required", "requires subscription", "membership required",
-    "monthly subscription", "annual subscription", "rent-to-own", "rent to own",
-    "subscription", "membership", "paid only", "commercial license required",
+    "free trial", "trial version", "trial plugin", "trial",
+    "demo version", "demo only", "subscription required",
+    "requires subscription", "membership required", "monthly subscription",
+    "annual subscription", "rent-to-own", "rent to own",
+    "subscription", "membership", "paid only",
 ]
 
 GENERIC = [
-    "how to", "tutorial", "guide", "review", "comparison", "versus",
-    "what is", "explained", "tips", "interview", "podcast", "newsletter",
+    "tutorial", "how to", "guide", "review", "comparison",
+    "interview", "podcast", "newsletter", "tips", "explained",
 ]
 
-# Источники/слова, которые часто дают нераздачи. Не блокируем скидки вообще,
-# но скидка сама по себе не считается FREE.
-DEAL_WORDS = ["sale", "discount", "coupon", "deal", "off", "offer"]
+LIMITED = [
+    "limited time", "for a limited time", "until", "ends on",
+    "through", "expires", "while supplies last", "this week",
+    "today only", "48 hours", "72 hours", "until the end",
+]
+
+DEAL_ONLY = ["sale", "discount", "coupon", "deal", "off"]
 
 
 def clean(s):
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
 
 
-def fetch(url, timeout=15):
+def fetch(url, timeout=12):
     req = Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 GPTNewsRelay/7.0",
-            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 GPTNewsRelay/8.0",
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
         },
     )
     with urlopen(req, timeout=timeout) as r:
@@ -95,7 +88,6 @@ def parse_feed(raw):
     root = ET.fromstring(raw)
     items = []
 
-    # RSS 2.0
     for x in root.findall(".//item"):
         title = clean(x.findtext("title"))
         link = clean(x.findtext("link"))
@@ -103,7 +95,6 @@ def parse_feed(raw):
         if title and link:
             items.append((title, link, desc))
 
-    # Atom / некоторые Google News feeds
     if not items:
         ns = {"a": "http://www.w3.org/2005/Atom"}
         for x in root.findall(".//a:entry", ns):
@@ -111,9 +102,8 @@ def parse_feed(raw):
             desc = clean(x.findtext("a:summary", default="", namespaces=ns))
             link = ""
             for l in x.findall("a:link", ns):
-                href = l.attrib.get("href", "")
-                if href:
-                    link = href
+                if l.attrib.get("href"):
+                    link = l.attrib["href"]
                     break
             if title and link:
                 items.append((title, link, desc))
@@ -123,30 +113,40 @@ def parse_feed(raw):
 
 def load_seen():
     try:
-        with open("seen_v3.json", encoding="utf-8") as f:
+        with open("seen_v4.json", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
 def save_seen(seen):
-    with open("seen_v3.json", "w", encoding="utf-8") as f:
+    with open("seen_v4.json", "w", encoding="utf-8") as f:
         json.dump(seen, f, ensure_ascii=False)
+
+
+def canonical_url(url):
+    try:
+        p = urlsplit(url)
+        # Убираем типичный трекинг, чтобы одинаковая статья не считалась новой.
+        q = re.sub(r"(^|&)(utm_[^=]+|gclid|fbclid)=[^&]*", "", p.query)
+        q = re.sub(r"&&+", "&", q).strip("&")
+        return urlunsplit((p.scheme, p.netloc.lower(), p.path.rstrip("/"), q, ""))
+    except Exception:
+        return url
 
 
 def translate_ru(text):
     text = clean(text)
     if not text:
-        return text
+        return ""
     try:
         url = (
             "https://translate.googleapis.com/translate_a/single?client=gtx"
-            "&sl=auto&tl=ru&dt=t&q=" + quote(text)
+            "&sl=auto&tl=ru&dt=t&q=" + quote(text[:900])
         )
-        raw = fetch(url, timeout=10)
+        raw = fetch(url, timeout=8)
         data = json.loads(raw.decode("utf-8"))
-        translated = "".join(p[0] for p in data[0] if p and p[0])
-        return translated.strip() or text
+        return "".join(x[0] for x in data[0] if x and x[0]).strip() or text
     except Exception as e:
         print("TRANSLATION ERROR:", e, flush=True)
         return text
@@ -154,38 +154,64 @@ def translate_ru(text):
 
 def analyze(title, desc):
     text = (title + " " + desc).lower()
-    score = 0
-    for word, points in GOOD.items():
-        if word in text:
-            score += points
 
     bad = [x for x in BAD if x in text]
-    # Trial/subscription = стоп независимо от количества FREE в тексте.
     if bad:
-        return False, -999, bad
+        return False, -999, bad, False
 
-    # Просто "sale/discount" без FREE нам не нужен.
-    has_free = "free" in text or "0.00" in text or "$0" in text or "£0" in text or "€0" in text
+    has_free = any(x in text for x in [
+        "free", "0.00", "$0", "£0", "€0", "pay what you like",
+        "pay-what-you-like", "name your price"
+    ])
     if not has_free:
-        return False, score, []
+        return False, 0, [], False
 
-    return score >= 8, score, []
+    score = sum(v for k, v in GOOD.items() if k in text)
+
+    # Бесплатность должна быть связана с нашим типом контента.
+    if not any(k in text for k in [
+        "plugin", "vst", "sample", "vocal", "preset", "serum",
+        "vital", "drum", "one-shot", "loop", "soundbank", "synth"
+    ]):
+        return False, score, [], False
+
+    # Общие статьи/обзоры не нужны, если нет сильного совпадения.
+    if any(x in text for x in GENERIC) and score < 14:
+        return False, score, [], False
+
+    limited = any(x in text for x in LIMITED)
+    return score >= 8, score, [], limited
 
 
 def category(title, desc):
     text = (title + " " + desc).lower()
 
-    if any(x in text for x in ["vocal", "vocals", "acapella", "a cappella"]):
-        return "🎤 VOCALS"
-    if any(x in text for x in ["serum", "vital", "preset", "presets", "soundbank", "sound bank"]):
-        return "🎹 PRESETS"
-    if any(x in text for x in ["sample pack", "samples", "sample pack", "drum kit", "drums", "one-shot", "one shot", "loops"]):
-        return "🥁 SAMPLES"
-    if any(x in text for x in ["vst", "plugin", "plug-in", "effect plugin", "instrument plugin"]):
-        return "🔌 PLUGINS"
+    if any(x in text for x in [
+        "vocal", "vocals", "acapella", "a cappella", "voice pack", "choir"
+    ]):
+        return "🎤 VOCALS", "#vocals"
+
+    if any(x in text for x in [
+        "serum", "vital", "preset", "presets", "soundbank", "sound bank"
+    ]):
+        return "🎹 PRESETS", "#presets"
+
+    if any(x in text for x in [
+        "sample pack", "samples", "drum kit", "drums", "one-shot",
+        "one shot", "loops", "wav pack", "sound pack"
+    ]):
+        return "🥁 SAMPLES", "#samples"
+
+    if any(x in text for x in [
+        "vst", "plugin", "plug-in", "effect plugin", "instrument plugin",
+        "synthesizer", "synth plugin"
+    ]):
+        return "🔌 PLUGINS", "#plugins"
+
     if "midi" in text:
-        return "🎼 MIDI"
-    return "🎛️ MUSIC PRODUCTION"
+        return "🎼 MIDI", "#midi"
+
+    return "🎛️ OTHER", "#other"
 
 
 def telegram(text, url):
@@ -201,26 +227,43 @@ def telegram(text, url):
         data=payload,
         headers={"Content-Type": "application/json"},
     )
-    with urlopen(req, timeout=15) as r:
+    with urlopen(req, timeout=12) as r:
         r.read()
 
 
-def post(title, desc, url, source):
-    tag = category(title, desc)
+def make_post(title, desc, url, source, limited):
+    tag, hashtag = category(title, desc)
+
     ru_title = translate_ru(title)
+    short_desc = clean(desc)[:350]
+    ru_desc = translate_ru(short_desc) if short_desc else ""
+
+    status = "🟡 <b>FREE — ОГРАНИЧЕННОЕ ВРЕМЯ</b>" if limited else "🟢 <b>FREE — БЕСПЛАТНО</b>"
 
     text = (
-        f"{tag}\n\n"
+        f"{tag}  {hashtag}\n\n"
         f"<b>{html.escape(ru_title)}</b>\n\n"
-        f"🆓 <b>БЕСПЛАТНО</b>\n"
+        f"{status}\n"
         f"📌 Источник: {html.escape(source)}"
     )
 
-    # Если в описании есть royalty-free — показываем это отдельно.
-    if "royalty-free" in (title + " " + desc).lower() or "royalty free" in (title + " " + desc).lower():
-        text += "\n✅ Royalty-free"
+    if ru_desc:
+        text += f"\n\n{html.escape(ru_desc)}"
+
+    low = (title + " " + desc).lower()
+    if "royalty-free" in low or "royalty free" in low:
+        text += "\n\n✅ Royalty-free"
 
     telegram(text, url)
+
+
+def fetch_source(source):
+    name, url = source
+    try:
+        items = parse_feed(fetch(url))
+        return name, items, None
+    except Exception as e:
+        return name, [], e
 
 
 def main():
@@ -232,53 +275,71 @@ def main():
     published = 0
     skipped = 0
     errors = 0
+    candidates = []
 
-    print("START MULTI-SOURCE SCAN", flush=True)
+    print("START FAST MULTI-SOURCE SCAN", flush=True)
 
-    # Лимит на один запуск, чтобы при первом запуске не заспамить канал.
-    MAX_POSTS_PER_RUN = 12
+    # Параллельно читаем источники — поэтому релей больше не должен
+    # ждать каждый RSS по очереди.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(fetch_source, s) for s in SOURCES]
+        for future in as_completed(futures):
+            name, items, err = future.result()
+            if err:
+                errors += 1
+                print(f"FEED ERROR {name}: {err}", flush=True)
+                continue
 
-    for source, feed_url in SOURCES:
-        if published >= MAX_POSTS_PER_RUN:
-            break
+            print(f"FOUND {len(items)} from {name}", flush=True)
 
-        try:
-            items = parse_feed(fetch(feed_url))
-            print(f"FOUND {len(items)} from {source}", flush=True)
+            for title, url, desc in items[:25]:
+                canon = canonical_url(url)
+                key = hashlib.sha256(canon.encode()).hexdigest()
 
-            # Новые/последние элементы идут первыми для более быстрого результата.
-            for title, url, desc in reversed(items):
-                if published >= MAX_POSTS_PER_RUN:
-                    break
-
-                key = hashlib.sha256(url.encode()).hexdigest()
                 if key in seen:
                     continue
 
-                ok, score, bad = analyze(title, desc)
+                ok, score, bad, limited = analyze(title, desc)
 
-                # Запоминаем только реально просмотренные материалы.
+                # Сразу запоминаем просмотренные URL, чтобы не гонять их
+                # по кругу на следующих запусках.
                 seen[key] = int(time.time())
 
                 if not ok:
                     skipped += 1
                     continue
 
-                try:
-                    post(title, desc, url, source)
-                    published += 1
-                    print(f"POSTED [{score}] {source}: {title}", flush=True)
-                    time.sleep(0.35)
-                except Exception as e:
-                    errors += 1
-                    print("TELEGRAM ERROR:", e, flush=True)
+                # Дедупликация ещё до публикации: одна и та же статья
+                # из BPB + Google News попадёт только один раз.
+                candidates.append((score, limited, name, title, url, desc, key))
 
+    # Самое релевантное — первым.
+    candidates.sort(key=lambda x: x[0], reverse=True)
+
+    MAX_POSTS_PER_RUN = 12
+    for score, limited, source, title, url, desc, key in candidates:
+        if published >= MAX_POSTS_PER_RUN:
+            break
+
+        try:
+            make_post(title, desc, url, source, limited)
+            published += 1
+            print(
+                f"POSTED [{score}] {source}: {title}"
+                + (" [LIMITED]" if limited else ""),
+                flush=True
+            )
+            time.sleep(0.25)
         except Exception as e:
             errors += 1
-            print("FEED ERROR", source, e, flush=True)
+            print(f"TELEGRAM ERROR {source}: {e}", flush=True)
 
     save_seen(seen)
-    print(f"DONE published={published} skipped={skipped} errors={errors}", flush=True)
+    print(
+        f"DONE published={published} skipped={skipped} "
+        f"candidates={len(candidates)} errors={errors}",
+        flush=True
+    )
     return 0
 
 
