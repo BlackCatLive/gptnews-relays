@@ -41,10 +41,21 @@ BAD = (
 )
 
 EDITORIAL = (
-    "best free", "top 10", "top 20", "top 50", "top 100", "ultimate list",
-    "best platforms", "roundup", "list of", "guide to", "how to",
-    "review", "reviews", "new single", "album", "song", "celebrate",
-    "ministry", "artist releases", "anniversary", "news:",
+    "best free", "best platforms", "roundup", "list of", "guide to",
+    "how to", "review", "reviews", "new single", "album", "song",
+    "celebrate", "ministry", "artist releases", "anniversary", "news:",
+    "platforms for", "for all genres", "all genres",
+    "over 100,000", "over 100000", "unlimited free samples",
+    "sample packs in 2026", "top platforms",
+)
+
+EDITORIAL_PATTERNS = (
+    r"\btop\s+\d+\b",
+    r"\b\d+\s+free\s+sample\s+packs?\b",
+    r"\b\d+\s+free\s+samples?\b",
+    r"\b\d+\s+free\s+vsts?\b",
+    r"\b\d+\s+free\s+presets?\b",
+    r"\b\d+\s+free\s+plugins?\b",
 )
 
 UNRELATED = (
@@ -151,6 +162,18 @@ def classify(item):
     if any(term in main_text for term in EDITORIAL):
         return -999, [], [], "editorial"
 
+    if any(re.search(pattern, main_text) for pattern in EDITORIAL_PATTERNS):
+        return -999, [], [], "editorial-list"
+
+    # Reject pages whose title is clearly a catalog/listicle rather than
+    # one concrete downloadable product/resource.
+    title_lower = item["title"].lower()
+    if any(x in title_lower for x in (
+        "platforms", "best of", "ultimate", "collection of",
+        "free resources", "free resource list", "sample radar:",
+    )):
+        return -999, [], [], "catalog-title"
+
     direct_resource = any(term in main_text for term in (
         "download", "downloadable", "sample pack", "preset pack",
         "vocal pack", "acapella pack", "free vst", "free vst3",
@@ -171,8 +194,19 @@ def classify(item):
     if not genres and not generic_ok:
         return -999, [], [], "no-target-genre"
 
+    # Generic sample/drum resources are NOT enough by themselves.
+    # Generic plugins, presets and vocals remain useful across the target styles.
+    if not genres and any(x in categories for x in ("samples", "drums")):
+        return -999, [], [], "generic-sample-no-genre"
+
     if any(x in main_text for x in UNRELATED) and not genres:
         return -999, [], [], "unrelated-genre"
+
+    if any(x in main_text for x in (
+        "release free sample pack", "releases free sample pack",
+        "release a free sample pack", "new single", "new album",
+    )):
+        return -999, [], [], "artist-news"
 
     score = 12 + sum(RESOURCE[x] for x in resource_hits) + sum(GENRES[x] for x in genres)
 
@@ -349,3 +383,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
