@@ -189,46 +189,52 @@ def genre_tier(genres):
 
 
 def classify(item):
-    main_text = (item["title"] + " " + item["description"]).lower()
+    title = item["title"].lower().strip()
+    desc = item["description"].lower()
+    main_text = title + " " + desc
     hint = (item.get("hint") or "").lower()
     source = (item.get("source") or "").lower()
-    text = main_text + " " + hint
 
-    resource_hits = [term for term in RESOURCE if term in main_text]
+    # Resource evidence can come from title OR description.
+    resource_hits = [
+        term for term in RESOURCE
+        if term in main_text
+    ]
     if not resource_hits:
         return -999, [], [], "not-resource"
 
-    free_from_hint = any(
-        x in source for x in ("free", "minimal", "rominimal", "deep tech", "tech house", "house vocals")
+    # The material must be free. For targeted Google searches, the query
+    # itself can provide the free intent.
+    free_signal = (
+        any(term in main_text for term in FREE_WORDS)
+        or "free" in source
     )
-    if not any(term in main_text for term in FREE_WORDS) and not free_from_hint:
+    if not free_signal:
         return -999, [], [], "no-free-signal"
 
+    # Paid/trial signals always win.
     if any(term in main_text for term in BAD):
         return -999, [], [], "paid-or-trial"
 
-    if any(term in main_text for term in EDITORIAL):
+    # IMPORTANT: editorial detection is title-first. A useful article can
+    # mention "best" in its description without itself being a listicle.
+    if any(term in title for term in EDITORIAL):
         return -999, [], [], "editorial"
 
-    if any(re.search(pattern, main_text) for pattern in EDITORIAL_PATTERNS):
+    if any(re.search(pattern, title) for pattern in EDITORIAL_PATTERNS):
         return -999, [], [], "editorial-list"
 
-    # "Best X sample packs" is a recommendation/list article, not a single
-    # resource. Do not publish it just because it contains "free" somewhere.
-    title_lower = item["title"].strip().lower()
-    if re.match(r"^(the\s+)?best\b", title_lower):
+    if re.match(r"^(the\s+)?best\b", title):
         return -999, [], [], "best-listicle"
 
-    if re.match(r"^\d+\s+", title_lower):
+    if re.match(r"^\d+\s+", title):
         return -999, [], [], "numbered-listicle"
 
-    # Reject pages whose title is clearly a catalog/listicle rather than
-    # one concrete downloadable product/resource.
-    title_lower = item["title"].lower()
-    if any(x in title_lower for x in (
+    if any(x in title for x in (
         "platforms", "best of", "ultimate", "collection of",
         "free resources", "free resource list", "sample radar:",
         "for all genres", "over 100,000", "over 100000",
+        "top platforms",
     )):
         return -999, [], [], "catalog-title"
 
@@ -237,79 +243,95 @@ def classify(item):
         "vocal pack", "acapella pack", "free vst", "free vst3",
         "free plugin", "free sample", "free samples", "free preset",
         "free presets", "free drum kit", "one-shot", "one shot",
+        "sample pack", "preset", "vocals", "acapella",
     ))
-    resource_from_hint = any(
-        x in source for x in ("free vst", "free samples", "free sample", "serum", "vital", "vocals", "samples")
-    )
-    if not direct_resource and not resource_from_hint:
+
+    if not direct_resource:
         return -999, [], [], "not-direct-resource"
 
-    # Prefer genre evidence from the actual article. A targeted Google query
-    # may also provide context, but it is accepted only for concrete resources,
-    # never for listicles/news/editorial pages.
-    genre_text = main_text
-
-    def has_term_in(value, term):
+    # Genre evidence: actual article first; targeted Google query is a
+    # fallback only after the article has passed resource/editorial checks.
+    def has_term(value, term):
         pattern = r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])"
         return re.search(pattern, value) is not None
 
-    actual_genres = [term for term in GENRES if has_term_in(genre_text, term)]
-
-    hint_genres = []
-    for term in GENRES:
-        if has_term_in(hint, term):
-            hint_genres.append(term)
+    actual_genres = [term for term in GENRES if has_term(main_text, term)]
+    hint_genres = [term for term in GENRES if has_term(hint, term)]
 
     genres = actual_genres[:]
+    if not genres and hint_genres:
+        genres = hint_genres[:]
+
     tier, core_genres, related_genres = genre_tier(genres)
 
     categories = [
-        category for category, terms in CATEGORY_TERMS.items()
+        category
+        for category, terms in CATEGORY_TERMS.items()
         if any(term in main_text for term in terms)
     ]
 
-    # Generic presets/plugins/vocals are useful across the target styles.
-    generic_ok = any(x in categories for x in ("presets", "plugins", "vocals"))
-    # Targeted Google searches can supply genre context for a concrete resource.
-    # This does NOT apply to editorial/listicle/news pages (already rejected above).
-    if not genres and hint_genres:
-        genres = hint_genres[:]
-        tier, core_genres, related_genres = genre_tier(genres)
+    # Universal resources: plugins, presets and vocals can be useful across
+    # the whole target style family.
+    generic_ok = any(
+        x in categories
+        for x in ("presets", "plugins", "vocals")
+    )
 
     if not genres and not generic_ok:
         return -999, [], [], "no-target-genre"
 
-    # Generic sample/drum resources are NOT enough by themselves.
-    # Generic plugins, presets and vocals remain useful across the target styles.
-    if not genres and any(x in categories for x in ("samples", "drums")):
+    # A sample/drum pack without target-genre evidence is too broad.
+    if not genres and any(
+        x in categories
+        for x in ("samples", "drums")
+    ):
         return -999, [], [], "generic-sample-no-genre"
 
+    # Unrelated genres are rejected unless a target genre is explicitly present.
     if any(x in main_text for x in UNRELATED) and not genres:
         return -999, [], [], "unrelated-genre"
 
-    if any(x in main_text for x in (
-        "release free sample pack", "releases free sample pack",
-        "release a free sample pack", "new single", "new album",
+    # Artist/release news is never a resource.
+    if any(x in title for x in (
+        "release", "releases", "new single", "new album",
+        "artist", "celebrates", "anniversary",
     )):
         return -999, [], [], "artist-news"
 
-    score = 12 + sum(RESOURCE[x] for x in resource_hits) + sum(GENRES[x] for x in genres)
+    score = (
+        12
+        + sum(RESOURCE[x] for x in resource_hits)
+        + sum(GENRES[x] for x in genres)
+    )
 
     if tier == "CORE":
         score += 22
     elif tier == "RELATED":
         score += 7
 
-    if any(x in core_genres for x in ("rominimal", "deep minimal", "minimal house")):
+    if any(
+        x in core_genres
+        for x in ("rominimal", "deep minimal", "minimal house")
+    ):
         score += 10
-    if any(x in main_text for x in ("royalty-free", "royalty free", "commercial use")):
+
+    if any(
+        x in main_text
+        for x in ("royalty-free", "royalty free", "commercial use")
+    ):
         score += 5
-    if any(x in main_text for x in ("download", "downloadable", "get the pack")):
+
+    if any(
+        x in main_text
+        for x in ("download", "downloadable", "get the pack")
+    ):
         score += 7
+
+    # Closely related genres are allowed but receive a small penalty.
     if any(x in main_text for x in UNRELATED) and genres:
         score -= 5
 
-    if score < 35:
+    if score < 25:
         return -999, [], [], "low-score"
 
     tagged_genres = [f"tier:{tier}"] + genres
