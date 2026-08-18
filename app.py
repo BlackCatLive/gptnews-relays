@@ -134,10 +134,22 @@ def fetch(url, timeout=15):
         return r.read()
 
 def parse_feed(source, url, hint=""):
-    try:
-        root = ET.fromstring(fetch(url))
-    except Exception as exc:
-        print(f"FEED ERROR {source}: {exc}")
+    urls = [url]
+    if source == "Bedroom Producers Blog":
+        urls.append("https://bedroomproducersblog.com/feed/")
+        urls.append("https://bedroomproducersblog.com/feed/?post_type=post")
+
+    root = None
+    last_error = None
+    for candidate in dict.fromkeys(urls):
+        try:
+            root = ET.fromstring(fetch(candidate))
+            break
+        except Exception as exc:
+            last_error = exc
+
+    if root is None:
+        print(f"FEED ERROR {source}: {last_error}")
         return []
     result = []
     for node in root.iter():
@@ -201,12 +213,22 @@ def classify(item):
     if any(re.search(pattern, main_text) for pattern in EDITORIAL_PATTERNS):
         return -999, [], [], "editorial-list"
 
+    # "Best X sample packs" is a recommendation/list article, not a single
+    # resource. Do not publish it just because it contains "free" somewhere.
+    title_lower = item["title"].strip().lower()
+    if re.match(r"^(the\s+)?best\b", title_lower):
+        return -999, [], [], "best-listicle"
+
+    if re.match(r"^\d+\s+", title_lower):
+        return -999, [], [], "numbered-listicle"
+
     # Reject pages whose title is clearly a catalog/listicle rather than
     # one concrete downloadable product/resource.
     title_lower = item["title"].lower()
     if any(x in title_lower for x in (
         "platforms", "best of", "ultimate", "collection of",
         "free resources", "free resource list", "sample radar:",
+        "for all genres", "over 100,000", "over 100000",
     )):
         return -999, [], [], "catalog-title"
 
@@ -222,7 +244,23 @@ def classify(item):
     if not direct_resource and not resource_from_hint:
         return -999, [], [], "not-direct-resource"
 
-    genres = [term for term in GENRES if term in text]
+    # Prefer genre evidence from the actual article. A targeted Google query
+    # may also provide context, but it is accepted only for concrete resources,
+    # never for listicles/news/editorial pages.
+    genre_text = main_text
+
+    def has_term_in(value, term):
+        pattern = r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])"
+        return re.search(pattern, value) is not None
+
+    actual_genres = [term for term in GENRES if has_term_in(genre_text, term)]
+
+    hint_genres = []
+    for term in GENRES:
+        if has_term_in(hint, term):
+            hint_genres.append(term)
+
+    genres = actual_genres[:]
     tier, core_genres, related_genres = genre_tier(genres)
 
     categories = [
@@ -232,6 +270,12 @@ def classify(item):
 
     # Generic presets/plugins/vocals are useful across the target styles.
     generic_ok = any(x in categories for x in ("presets", "plugins", "vocals"))
+    # Targeted Google searches can supply genre context for a concrete resource.
+    # This does NOT apply to editorial/listicle/news pages (already rejected above).
+    if not genres and hint_genres:
+        genres = hint_genres[:]
+        tier, core_genres, related_genres = genre_tier(genres)
+
     if not genres and not generic_ok:
         return -999, [], [], "no-target-genre"
 
@@ -407,6 +451,15 @@ def main():
     posted = 0
     errors = 0
 
+    core_count = sum(1 for _, _, genres, _ in candidates if "tier:CORE" in genres)
+    related_count = sum(1 for _, _, genres, _ in candidates if "tier:RELATED" in genres)
+    universal_count = sum(1 for _, _, genres, _ in candidates if "tier:UNIVERSAL" in genres)
+
+    print(
+        f"ACCEPTED_TIERS CORE={core_count} "
+        f"RELATED={related_count} UNIVERSAL={universal_count}"
+    )
+
     for score, item, genres, categories in candidates[:12]:
         try:
             post = build_post(item, score, genres, categories)
@@ -435,5 +488,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
