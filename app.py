@@ -56,3 +56,4 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers(); self.wfile.write(body)
     def log_message(self,*a): pass
 HTTPServer(("0.0.0.0",int(os.getenv("PORT","10000"))),H).serve_forever()
+
